@@ -260,8 +260,8 @@ final class ContinuoTests: XCTestCase {
     func testRendererUsesPlacedFrameIntersectionForTheIncomingSeam() throws {
         let firstValues: [Float] = [0.10, 0.20, 0.30, 0.40]
         let secondValues: [Float] = [0.30, 0.40, 0.50, 0.60]
-        let firstImage = try XCTUnwrap(makeTestImage(width: 1, rows: firstValues))
-        let secondImage = try XCTUnwrap(makeTestImage(width: 1, rows: secondValues))
+        let firstImage = try XCTUnwrap(makeExactRowImage(firstValues))
+        let secondImage = try XCTUnwrap(makeExactRowImage(secondValues))
         let firstID = UUID()
         let secondID = UUID()
         let first = makeNormalizedImage(id: firstID, image: firstImage, rows: firstValues, width: 1)
@@ -312,13 +312,13 @@ final class ContinuoTests: XCTestCase {
         let secondID = UUID()
         let first = makeNormalizedImage(
             id: firstID,
-            image: try XCTUnwrap(makeTestImage(width: 1, rows: firstValues)),
+            image: try XCTUnwrap(makeExactRowImage(firstValues)),
             values: firstValues,
             width: 1
         )
         let second = makeNormalizedImage(
             id: secondID,
-            image: try XCTUnwrap(makeTestImage(width: 1, rows: secondValues)),
+            image: try XCTUnwrap(makeExactRowImage(secondValues)),
             values: secondValues,
             width: 1
         )
@@ -373,6 +373,232 @@ final class ContinuoTests: XCTestCase {
         XCTAssertLessThan(data[4], 50, "The bottom source row must remain the bottom preview row.")
     }
 
+    func testPixelCompositorPreservesPixelsOutsideTheExplicitSeam() throws {
+        let firstValues: [[Float]] = [
+            [0.10, 0.20],
+            [0.30, 0.40],
+            [0.50, 0.60],
+            [0.70, 0.80]
+        ]
+        let secondValues: [[Float]] = [
+            [0.55, 0.65],
+            [0.75, 0.85],
+            [0.90, 0.95],
+            [0.15, 0.25]
+        ]
+        let first = try XCTUnwrap(makeTestImage(values: firstValues))
+        let second = try XCTUnwrap(makeTestImage(values: secondValues))
+
+        let output = try PixelCompositor().compose(
+            images: [first, second],
+            frames: [
+                Rect2D(x: 0, y: 0, width: 2, height: 4),
+                Rect2D(x: 0, y: 2, width: 2, height: 4)
+            ],
+            seamPositions: [0, 1]
+        )
+
+        XCTAssertEqual(output.width, 2)
+        XCTAssertEqual(output.height, 6)
+        XCTAssertEqual(readRedRows(from: output), [
+            [25, 51],
+            [76, 102],
+            [127, 153],
+            [185, 210],
+            [229, 242],
+            [38, 63]
+        ])
+    }
+
+    func testPixelCompositorLeavesIdenticalOverlapByteForByteUnchanged() throws {
+        let firstValues: [[Float]] = [
+            [0.10],
+            [0.20],
+            [0.30],
+            [0.40]
+        ]
+        let secondValues: [[Float]] = [
+            [0.30],
+            [0.40],
+            [0.50],
+            [0.60]
+        ]
+
+        let output = try PixelCompositor().compose(
+            images: [
+                try XCTUnwrap(makeExactRowImage(firstValues.map { $0[0] })),
+                try XCTUnwrap(makeExactRowImage(secondValues.map { $0[0] }))
+            ],
+            frames: [
+                Rect2D(x: 0, y: 0, width: 1, height: 4),
+                Rect2D(x: 0, y: 2, width: 1, height: 4)
+            ],
+            seamPositions: [0, 1]
+        )
+
+        XCTAssertEqual(readRedRows(from: output), [[25], [51], [76], [102], [127], [153]])
+    }
+
+    func testPixelCompositorUsesTwoExplicitRowsForLargeDisagreements() throws {
+        let first = try XCTUnwrap(makeTestImage(values: (0..<12).map { _ in [Float(0.10)] }))
+        let second = try XCTUnwrap(makeTestImage(values: (0..<12).map { _ in [Float(0.90)] }))
+
+        let output = try PixelCompositor().compose(
+            images: [first, second],
+            frames: [
+                Rect2D(x: 0, y: 0, width: 1, height: 12),
+                Rect2D(x: 0, y: 4, width: 1, height: 12)
+            ],
+            seamPositions: [0, 6]
+        )
+        let rows = readRedRows(from: output).map { $0[0] }
+
+        XCTAssertEqual(Array(rows[0..<9]), Array(repeating: 25, count: 9))
+        XCTAssertGreaterThan(rows[9], 25)
+        XCTAssertLessThan(rows[9], 230)
+        XCTAssertGreaterThan(rows[10], rows[9])
+        XCTAssertEqual(Array(rows[11..<16]), Array(repeating: 229, count: 5))
+    }
+
+    func testPixelCompositorSurvivesPNGEncodeAndDecodeWithoutChangingPixels() throws {
+        let image = try XCTUnwrap(makeTestImage(values: [[0.05, 0.25], [0.50, 0.75]]))
+        let output = try PixelCompositor().compose(
+            images: [image],
+            frames: [Rect2D(x: 0, y: 0, width: 2, height: 2)],
+            seamPositions: [0]
+        )
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("continuo-compositor-roundtrip-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writePNG(output, to: url)
+
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let decoded = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(readRedRows(from: decoded), readRedRows(from: output))
+    }
+
+    func testPixelCompositorHandlesPaddedRowsAndNonRGBAInputs() throws {
+        let values: [[Float]] = [
+            [0.10, 0.20],
+            [0.30, 0.40]
+        ]
+        let padded = try XCTUnwrap(makePaddedImage(values: values))
+        let grayscale = try XCTUnwrap(makeGrayscaleImage(values: values))
+
+        let paddedOutput = try PixelCompositor().compose(
+            images: [padded],
+            frames: [Rect2D(x: 0, y: 0, width: 2, height: 2)],
+            seamPositions: [0]
+        )
+        let grayscaleOutput = try PixelCompositor().compose(
+            images: [grayscale],
+            frames: [Rect2D(x: 0, y: 0, width: 2, height: 2)],
+            seamPositions: [0]
+        )
+
+        XCTAssertEqual(readRedRows(from: paddedOutput), [[25, 51], [76, 102]])
+        XCTAssertEqual(readRedRows(from: grayscaleOutput), [[25, 51], [76, 102]])
+    }
+
+    func testRendererCompositesThreeScreensInOrder() throws {
+        let firstValues = (0..<4).map { Float($0 + 1) / 10 }
+        let secondValues = (2..<6).map { Float($0 + 1) / 10 }
+        let thirdValues = (4..<8).map { Float($0 + 1) / 10 }
+        let firstID = UUID()
+        let secondID = UUID()
+        let thirdID = UUID()
+        let first = makeNormalizedImage(
+            id: firstID,
+            image: try XCTUnwrap(makeExactRowImage(firstValues)),
+            values: firstValues,
+            width: 1
+        )
+        let second = makeNormalizedImage(
+            id: secondID,
+            image: try XCTUnwrap(makeExactRowImage(secondValues)),
+            values: secondValues,
+            width: 1
+        )
+        let third = makeNormalizedImage(
+            id: thirdID,
+            image: try XCTUnwrap(makeExactRowImage(thirdValues)),
+            values: thirdValues,
+            width: 1
+        )
+
+        let joins = [
+            makeAcceptedJoin(from: firstID, to: secondID, translation: Point2D(x: 0, y: 2), overlapHeight: 2),
+            makeAcceptedJoin(from: secondID, to: thirdID, translation: Point2D(x: 0, y: 2), overlapHeight: 2)
+        ]
+        let preview = try PreviewRenderer().render(sources: [first, second, third], joins: joins)
+
+        XCTAssertEqual(preview.pixelSize, PixelSize(width: 1, height: 8))
+        XCTAssertEqual(readRedRows(from: preview.image).map { $0[0] }, [25, 51, 76, 102, 127, 153, 178, 204])
+    }
+
+    func testRendererAlignsNegativeOriginAndSmallCrossAxisDriftToPixels() throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        let firstValues: [[Float]] = [
+            [0.10, 0.20],
+            [0.30, 0.40],
+            [0.50, 0.60],
+            [0.70, 0.80]
+        ]
+        let secondValues: [[Float]] = [
+            [0.30, 0.40],
+            [0.50, 0.60],
+            [0.70, 0.80],
+            [0.90, 1.00]
+        ]
+        let first = makeNormalizedImage(
+            id: firstID,
+            image: try XCTUnwrap(makeTestImage(values: firstValues)),
+            values: firstValues
+        )
+        let second = makeNormalizedImage(
+            id: secondID,
+            image: try XCTUnwrap(makeTestImage(values: secondValues)),
+            values: secondValues
+        )
+        let join = makeAcceptedJoin(
+            from: firstID,
+            to: secondID,
+            translation: Point2D(x: -1, y: 2),
+            overlapWidth: 1,
+            overlapHeight: 2
+        )
+
+        let preview = try PreviewRenderer().render(sources: [first, second], joins: [join])
+
+        XCTAssertEqual(preview.pixelSize, PixelSize(width: 3, height: 6))
+        XCTAssertEqual(preview.placements.map { $0.frame }, [
+            Rect2D(x: 1, y: 0, width: 2, height: 4),
+            Rect2D(x: 0, y: 2, width: 2, height: 4)
+        ])
+    }
+
+    func testPixelCompositorHonorsCancellation() async throws {
+        let image = try XCTUnwrap(makeTestImage(values: (0..<64).map { _ in [Float(0.5)] }))
+        let task = Task { () throws -> CGImage in
+            await Task.yield()
+            return try PixelCompositor().compose(
+                images: [image],
+                frames: [Rect2D(x: 0, y: 0, width: 1, height: 64)],
+                seamPositions: [0]
+            )
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled compositor task should not produce an image.")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected cancellation, got \(error).")
+        }
+    }
+
     private func makeNormalizedImage(id: UUID, image: CGImage, rows: [Float], width: Int = 16) -> NormalizedImage {
         let values = rows.flatMap { row in
             (0..<width).map { column in
@@ -401,6 +627,52 @@ final class ContinuoTests: XCTestCase {
         )
     }
 
+    private func makeAcceptedJoin(
+        from: UUID,
+        to: UUID,
+        translation: Point2D,
+        overlapWidth: Int = 1,
+        overlapHeight: Int
+    ) -> JoinResult {
+        let diagnostics = JoinDiagnostics(
+            code: "registration.accepted",
+            message: "High-confidence vertical join.",
+            recoverySuggestion: "",
+            similarityScore: 1,
+            overlapSize: PixelSize(width: overlapWidth, height: overlapHeight),
+            overlapPercentage: 0.5,
+            translation: translation,
+            crossAxisDrift: abs(translation.x),
+            residualError: 0,
+            backend: .correlationFallback,
+            ambiguousCandidates: false,
+            candidateCount: 1
+        )
+        return JoinResult(
+            fromSourceID: from,
+            toSourceID: to,
+            transform: AffineTransformData(translation: translation),
+            overlapRect: Rect2D(
+                x: translation.x,
+                y: translation.y,
+                width: Double(overlapWidth),
+                height: Double(overlapHeight)
+            ),
+            seam: SeamDefinition(axis: .horizontal, position: Double(overlapHeight / 2)),
+            confidence: .high,
+            diagnostics: diagnostics
+        )
+    }
+
+    private func readRedRows(from image: CGImage) -> [[UInt8]] {
+        guard let data = image.dataProvider?.data as Data? else { return [] }
+        return (0..<image.height).map { y in
+            (0..<image.width).map { x in
+                data[(y * image.bytesPerRow) + (x * 4)]
+            }
+        }
+    }
+
     private func makeTestImage(width: Int, rows: [Float]) -> CGImage? {
         let values = rows.map { row in
             (0..<width).map { column in
@@ -409,6 +681,10 @@ final class ContinuoTests: XCTestCase {
             }
         }
         return makeTestImage(values: values)
+    }
+
+    private func makeExactRowImage(_ rows: [Float]) -> CGImage? {
+        makeTestImage(values: rows.map { [$0] })
     }
 
     private func makeTestImage(values: [[Float]]) -> CGImage? {
@@ -437,6 +713,67 @@ final class ContinuoTests: XCTestCase {
             bytesPerRow: width * 4,
             space: colorSpace,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+
+    private func makePaddedImage(values: [[Float]]) -> CGImage? {
+        let width = values.first?.count ?? 0
+        let height = values.count
+        let bytesPerRow = (width * 4) + 8
+        var bytes = [UInt8](repeating: 0xA5, count: bytesPerRow * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let value = UInt8(max(0, min(255, Int(values[y][x] * 255))))
+                let offset = (y * bytesPerRow) + (x * 4)
+                bytes[offset] = value
+                bytes[offset + 1] = value
+                bytes[offset + 2] = value
+                bytes[offset + 3] = 255
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            return nil
+        }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+
+    private func makeGrayscaleImage(values: [[Float]]) -> CGImage? {
+        let width = values.first?.count ?? 0
+        let height = values.count
+        var bytes = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                bytes[(y * width) + x] = UInt8(max(0, min(255, Int(values[y][x] * 255))))
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData) else {
+            return nil
+        }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
             provider: provider,
             decode: nil,
             shouldInterpolate: false,

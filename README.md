@@ -15,11 +15,11 @@ xcodebuild -scheme Continuo -sdk iphonesimulator build
 xcodebuild -scheme Continuo -destination 'platform=macOS' test
 ```
 
-The repository currently contains the initial vertical-stitching milestone. The engine is separated from SwiftUI and platform adapters so registration, confidence, rendering, and image-processing behavior can be tested independently.
+The repository currently contains the initial vertical-stitching milestone. The engine is separated from SwiftUI and platform adapters so registration, confidence, normalization, and rendering behavior can be tested independently. Final composition uses an integer-grid RGBA pixel compositor so screenshot pixels outside the chosen seam are copied exactly rather than being affected by fractional Core Graphics clipping.
 
 ## Structure
 
-- `Continuo/ContinuoCore` — platform-neutral domain, normalization, registration, processing, cropping, and rendering.
+- `Continuo/ContinuoCore` — platform-neutral domain, full-resolution normalization, registration, deterministic pixel compositing, cropping, and rendering.
 - `Continuo/Features` — SwiftUI presentation and view-model state.
 - `Continuo/Platform` — Photos, Files, export, and source-deletion adapters.
 - `ContinuoTests` — engine and platform behavior tests.

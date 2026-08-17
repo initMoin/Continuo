@@ -407,6 +407,7 @@ public enum ContinuoError: Error, LocalizedError, Sendable {
     case imageDecodeFailed(String)
     case registrationFailed(JoinResult)
     case pixelCropFailed(PixelCropError)
+    case pixelCompositingFailed(PixelCompositingError)
     case renderingFailed(String)
     case outputTooLarge(PixelSize)
     case cancelled
@@ -430,6 +431,8 @@ public enum ContinuoError: Error, LocalizedError, Sendable {
         case let .registrationFailed(join):
             join.diagnostics.message
         case let .pixelCropFailed(error):
+            error.localizedDescription
+        case let .pixelCompositingFailed(error):
             error.localizedDescription
         case let .renderingFailed(message):
             message

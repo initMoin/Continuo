@@ -3,14 +3,14 @@ import Foundation
 
 public struct PreviewRenderer: Sendable {
     public var exportSettings: ExportSettings
-    private let pixelCropper: PixelRegionCropper
+    private let pixelCompositor: PixelCompositor
 
     public init(
         exportSettings: ExportSettings = ExportSettings(),
-        pixelCropper: PixelRegionCropper = PixelRegionCropper()
+        pixelCompositor: PixelCompositor = PixelCompositor()
     ) {
         self.exportSettings = exportSettings
-        self.pixelCropper = pixelCropper
+        self.pixelCompositor = pixelCompositor
     }
 
     public func render(sources: [NormalizedImage], joins: [JoinResult]) throws -> StitchPreview {
@@ -38,8 +38,17 @@ public struct PreviewRenderer: Sendable {
 
         let minimumX = framesInOrder.map(\.x).min() ?? 0
         let minimumY = framesInOrder.map(\.y).min() ?? 0
+        // Registration may return subpixel residuals. The final screenshot is
+        // an integer pixel artifact, so align frame origins once here and pass
+        // only those integer coordinates to the compositor. The registration
+        // diagnostics retain the residual error for review.
         let translatedFrames = framesInOrder.map {
-            Rect2D(x: $0.x - minimumX, y: $0.y - minimumY, width: $0.width, height: $0.height)
+            Rect2D(
+                x: ($0.x - minimumX).rounded(.toNearestOrAwayFromZero),
+                y: ($0.y - minimumY).rounded(.toNearestOrAwayFromZero),
+                width: $0.width.rounded(.toNearestOrAwayFromZero),
+                height: $0.height.rounded(.toNearestOrAwayFromZero)
+            )
         }
         let canvasWidth = Int(ceil(translatedFrames.map { $0.x + $0.width }.max() ?? 0))
         let canvasHeight = Int(ceil(translatedFrames.map { $0.y + $0.height }.max() ?? 0))
@@ -54,39 +63,10 @@ public struct PreviewRenderer: Sendable {
             throw ContinuoError.outputTooLarge(canvasSize)
         }
 
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(
-                  data: nil,
-                  width: canvasWidth,
-                  height: canvasHeight,
-                  bitsPerComponent: 8,
-                  bytesPerRow: canvasWidth * 4,
-                  space: colorSpace,
-                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-              ) else {
-            throw ContinuoError.renderingFailed("Continuo could not create a preview canvas.")
-        }
-
-        context.saveGState()
-        // Source pixels are already normalized for display. Keep them
-        // untouched and convert only the engine's top-left frame coordinates
-        // into the bitmap CGContext's bottom-left drawing coordinates.
-        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: canvasWidth, height: canvasHeight))
-
-        for (index, source) in sources.enumerated() {
+        var seamPositions = [Double](repeating: 0, count: sources.count)
+        for (index, source) in sources.enumerated() where index > 0 {
             try Task.checkCancellation()
             let frame = translatedFrames[index]
-
-            guard index > 0 else {
-                try draw(
-                    source.image,
-                    in: frame,
-                    on: context,
-                    canvasHeight: canvasHeight
-                )
-                continue
-            }
 
             guard joins.first(where: { $0.toSourceID == source.source.id }) != nil else {
                 throw ContinuoError.renderingFailed(
@@ -109,14 +89,9 @@ public struct PreviewRenderer: Sendable {
                 )
             }
 
-            // The old renderer always kept the entire previous screenshot and
-            // began the incoming screenshot at the bottom edge of the overlap.
-            // That produced a hard, edge-only join. Find a low-disagreement,
-            // low-detail seam inside the shared content instead, then feather
-            // only a few pixels around that seam.
             let overlapStartInSource = max(0, overlapStartY - frame.y)
             let overlapEndInSource = min(frame.height, overlapEndY - frame.y)
-            let seamY = surgicalSeamPosition(
+            seamPositions[index] = surgicalSeamPosition(
                 previous: previous,
                 incoming: source,
                 previousFrame: previousFrame,
@@ -126,160 +101,21 @@ public struct PreviewRenderer: Sendable {
                 overlapStartInSource: overlapStartInSource,
                 overlapEndInSource: overlapEndInSource
             )
-            let featherPixels = min(4.0, max(1.0, floor(overlapHeight / 32.0)))
-            let featherStart = max(overlapStartInSource, seamY - (featherPixels / 2))
-            let featherEnd = min(overlapEndInSource, seamY + (featherPixels / 2))
-
-            // Preserve incoming pixels that are outside the previous frame's
-            // horizontal footprint. This matters when Vision finds a small
-            // cross-axis drift instead of a perfectly vertical translation.
-            if overlapStartX > frame.x {
-                try draw(
-                    source.image,
-                    in: frame,
-                    on: context,
-                    canvasHeight: canvasHeight,
-                    clip: CGRect(
-                        x: frame.x,
-                        y: frame.y,
-                        width: overlapStartX - frame.x,
-                        height: frame.height
-                    )
-                )
-            }
-            if overlapEndX < frame.x + frame.width {
-                try draw(
-                    source.image,
-                    in: frame,
-                    on: context,
-                    canvasHeight: canvasHeight,
-                    clip: CGRect(
-                        x: overlapEndX,
-                        y: frame.y,
-                        width: (frame.x + frame.width) - overlapEndX,
-                        height: frame.height
-                    )
-                )
-            }
-
-            let commonWidth = overlapEndX - overlapStartX
-            if overlapStartInSource > 0 {
-                try draw(
-                    source.image,
-                    in: frame,
-                    on: context,
-                    canvasHeight: canvasHeight,
-                    clip: CGRect(
-                        x: overlapStartX,
-                        y: frame.y,
-                        width: commonWidth,
-                        height: overlapStartInSource
-                    )
-                )
-            }
-
-            let featherHeight = featherEnd - featherStart
-            if featherHeight > 0.01 {
-                let bandCount = max(2, min(8, Int(ceil(featherHeight))))
-                for bandIndex in 0..<bandCount {
-                    let bandStart = featherStart + (featherHeight * Double(bandIndex) / Double(bandCount))
-                    let bandEnd = featherStart + (featherHeight * Double(bandIndex + 1) / Double(bandCount))
-                    let bandCenter = (bandStart + bandEnd) / 2
-                    let alpha = CGFloat((bandCenter - featherStart) / featherHeight)
-                    try draw(
-                        source.image,
-                        in: frame,
-                        on: context,
-                        canvasHeight: canvasHeight,
-                        clip: CGRect(
-                            x: overlapStartX,
-                            y: frame.y + bandStart,
-                            width: commonWidth,
-                            height: bandEnd - bandStart
-                        ),
-                        alpha: alpha
-                    )
-                }
-            }
-
-            let fullStart = max(frame.y + featherEnd, frame.y + overlapStartInSource)
-            if fullStart < frame.y + frame.height {
-                try draw(
-                    source.image,
-                    in: frame,
-                    on: context,
-                    canvasHeight: canvasHeight,
-                    clip: CGRect(
-                        x: overlapStartX,
-                        y: fullStart,
-                        width: commonWidth,
-                        height: (frame.y + frame.height) - fullStart
-                    )
-                )
-            }
         }
-        context.restoreGState()
 
-        guard let image = context.makeImage() else {
-            throw ContinuoError.renderingFailed("Continuo could not finalize the preview image.")
+        let image: CGImage
+        do {
+            image = try pixelCompositor.compose(
+                images: sources.map(\.image),
+                frames: translatedFrames,
+                seamPositions: seamPositions
+            )
+        } catch let error as PixelCompositingError {
+            throw ContinuoError.pixelCompositingFailed(error)
         }
 
         let placements = zip(sources, translatedFrames).map { SourcePlacement(sourceID: $0.0.source.id, frame: $0.1) }
         return StitchPreview(image: image, pixelSize: canvasSize, placements: placements, joins: joins)
-    }
-
-    private func draw(
-        _ image: CGImage,
-        in frame: Rect2D,
-        on context: CGContext,
-        canvasHeight: Int,
-        clip: CGRect? = nil,
-        alpha: CGFloat = 1
-    ) throws {
-        if let clip,
-           isIntegral(clip),
-           let sourceRect = sourceRect(for: clip, in: frame),
-           isIntegral(sourceRect),
-           sourceRect.width > 0,
-           sourceRect.height > 0 {
-            let cropped: CGImage
-            do {
-                cropped = try pixelCropper.crop(image, to: Rect2D(sourceRect))
-            } catch let error as PixelCropError {
-                throw ContinuoError.pixelCropFailed(error)
-            }
-            context.saveGState()
-            context.setAlpha(alpha)
-            context.draw(cropped, in: bottomLeftRect(clip, canvasHeight: canvasHeight))
-            context.restoreGState()
-            return
-        }
-
-        context.saveGState()
-        if let clip {
-            context.clip(to: bottomLeftRect(clip, canvasHeight: canvasHeight))
-        }
-        context.setAlpha(alpha)
-        context.draw(image, in: bottomLeftRect(frame.cgRect, canvasHeight: canvasHeight))
-        context.restoreGState()
-    }
-
-    private func sourceRect(for outputRect: CGRect, in frame: Rect2D) -> CGRect? {
-        let sourceRect = CGRect(
-            x: outputRect.minX - frame.x,
-            y: outputRect.minY - frame.y,
-            width: outputRect.width,
-            height: outputRect.height
-        )
-        let imageBounds = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
-        return imageBounds.contains(sourceRect) ? sourceRect : nil
-    }
-
-    private func isIntegral(_ rect: CGRect) -> Bool {
-        abs(rect.origin.x.rounded() - rect.origin.x) < 0.0001 &&
-        abs(rect.origin.y.rounded() - rect.origin.y) < 0.0001 &&
-        abs(rect.size.width.rounded() - rect.size.width) < 0.0001 &&
-        abs(rect.size.height.rounded() - rect.size.height) < 0.0001
     }
 
     private func surgicalSeamPosition(
@@ -356,12 +192,4 @@ public struct PreviewRenderer: Sendable {
         return bestY
     }
 
-    private func bottomLeftRect(_ topLeftRect: CGRect, canvasHeight: Int) -> CGRect {
-        CGRect(
-            x: topLeftRect.minX,
-            y: CGFloat(canvasHeight) - topLeftRect.maxY,
-            width: topLeftRect.width,
-            height: topLeftRect.height
-        )
-    }
 }
