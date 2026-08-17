@@ -2,9 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>remote-notification</string>
-	</array>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Continuo saves full-resolution stitched screenshots to Photos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Continuo imports screenshots, saves stitched images, and deletes selected originals from Photos when you ask.</string>
 </dict>
 </plist>
