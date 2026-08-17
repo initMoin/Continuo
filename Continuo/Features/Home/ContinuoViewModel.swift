@@ -39,6 +39,11 @@ final class ContinuoViewModel {
     private let sourceDeletionService = SourceDeletionService()
     private let engine = StitchEngine()
     private var processingTask: Task<Void, Never>?
+    /// Progress callbacks are delivered through main-actor tasks. This token
+    /// prevents a callback from an older stitch from changing the state of a
+    /// newer stitch, or from changing `.ready` back to `.processing(.complete)`
+    /// after the result has been published.
+    private var activeStitchID: UUID?
     private let logger = Logger(subsystem: "dev.iamshift.Continuo", category: "stitching")
 
     isolated deinit {
@@ -48,6 +53,7 @@ final class ContinuoViewModel {
     func importPhotos(_ items: [PhotosPickerItem]) {
         logger.info("Received photo selection with \(items.count) item(s).")
         processingTask?.cancel()
+        activeStitchID = nil
         preview = nil
         errorMessage = nil
         recoverySuggestion = nil
@@ -129,6 +135,7 @@ final class ContinuoViewModel {
     func stitch() {
         logger.info("Manual stitch requested for \(self.sources.count) source(s).")
         processingTask?.cancel()
+        activeStitchID = nil
         preview = nil
         errorMessage = nil
         recoverySuggestion = nil
@@ -144,24 +151,29 @@ final class ContinuoViewModel {
         }
 
         let selectedSources = sources
+        let stitchID = UUID()
+        activeStitchID = stitchID
         state = .processing(StitchProgress(stage: .normalizing, completed: 0, total: selectedSources.count, message: "Preparing screenshots…"))
 
         processingTask = Task { [weak self] in
             do {
                 guard let self else { return }
-                let result = try await runStitching(sources: selectedSources)
-                guard !Task.isCancelled else { return }
+                let result = try await runStitching(sources: selectedSources, stitchID: stitchID)
+                guard !Task.isCancelled, activeStitchID == stitchID else { return }
                 logger.info("Manual stitch completed successfully. Preview rendered at \(result.pixelSize.width)x\(result.pixelSize.height) pixels with \(result.joins.count) join(s).")
+                activeStitchID = nil
                 preview = result
                 state = .ready
                 processingTask = nil
             } catch let error as ContinuoError {
-                guard let self, !Task.isCancelled else { return }
+                guard let self, !Task.isCancelled, activeStitchID == stitchID else { return }
+                activeStitchID = nil
                 logger.error("Manual stitch failed: \(error.localizedDescription, privacy: .public)")
                 present(error)
                 processingTask = nil
             } catch {
-                guard let self, !Task.isCancelled else { return }
+                guard let self, !Task.isCancelled, activeStitchID == stitchID else { return }
+                activeStitchID = nil
                 logger.error("Manual stitch failed unexpectedly: \(error.localizedDescription, privacy: .public)")
                 state = .failed
                 errorMessage = error.localizedDescription
@@ -173,6 +185,7 @@ final class ContinuoViewModel {
     func cancelProcessing() {
         processingTask?.cancel()
         processingTask = nil
+        activeStitchID = nil
         state = .cancelled
         preparationStatus = nil
         errorMessage = ContinuoError.cancelled.localizedDescription
@@ -224,11 +237,13 @@ final class ContinuoViewModel {
         resetResult(cancelCurrentTask: cancelCurrentTask)
     }
 
-    private func runStitching(sources selectedSources: [SourceImage]) async throws -> StitchPreview {
+    private func runStitching(sources selectedSources: [SourceImage], stitchID: UUID) async throws -> StitchPreview {
         let engine = engine
         let progressHandler: @Sendable (StitchProgress) -> Void = { [weak self] progress in
             Task { @MainActor [weak self] in
-                self?.state = .processing(progress)
+                guard let self, self.activeStitchID == stitchID else { return }
+                guard case .processing = self.state else { return }
+                self.state = .processing(progress)
             }
         }
         return try await engine.stitch(sources: selectedSources, progress: progressHandler)
@@ -239,6 +254,7 @@ final class ContinuoViewModel {
             processingTask?.cancel()
             processingTask = nil
         }
+        activeStitchID = nil
         preview = nil
         errorMessage = nil
         recoverySuggestion = nil

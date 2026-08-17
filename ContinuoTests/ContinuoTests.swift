@@ -599,6 +599,49 @@ final class ContinuoTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testViewModelRemainsReadyAfterFinalProgressCallback() async throws {
+        let firstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-view-model-first-\(UUID().uuidString).png")
+        let secondURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-view-model-second-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: firstURL)
+            try? FileManager.default.removeItem(at: secondURL)
+        }
+
+        let firstRows = variedRows(start: 0, count: 100)
+        let secondRows = variedRows(start: 40, count: 100)
+        try writePNG(try XCTUnwrap(makeTestImage(width: 16, rows: firstRows)), to: firstURL)
+        try writePNG(try XCTUnwrap(makeTestImage(width: 16, rows: secondRows)), to: secondURL)
+
+        let viewModel = ContinuoViewModel()
+        viewModel.importFiles([firstURL, secondURL])
+        XCTAssertEqual(viewModel.sources.count, 2)
+        viewModel.stitch()
+
+        var reachedReady = false
+        for _ in 0..<250 {
+            if viewModel.state == .ready {
+                reachedReady = true
+                break
+            }
+            if case .failed = viewModel.state {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertTrue(reachedReady, "The view model did not publish a ready result: \(viewModel.state)")
+        XCTAssertNotNil(viewModel.preview)
+
+        // Allow any progress delivery tasks queued immediately before the
+        // engine returned to execute. They must not revert the ready state.
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(viewModel.state, .ready)
+        XCTAssertNotNil(viewModel.preview)
+    }
+
     private func makeNormalizedImage(id: UUID, image: CGImage, rows: [Float], width: Int = 16) -> NormalizedImage {
         let values = rows.flatMap { row in
             (0..<width).map { column in
