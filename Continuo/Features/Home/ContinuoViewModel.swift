@@ -1,7 +1,6 @@
 import Foundation
 import Observation
 import PhotosUI
-import _PhotosUI_SwiftUI
 import OSLog
 
 enum SourceCleanupState: Equatable {
@@ -50,8 +49,8 @@ final class ContinuoViewModel {
         processingTask?.cancel()
     }
 
-    func importPhotos(_ items: [PhotosPickerItem]) {
-        logger.info("Received photo selection with \(items.count) item(s).")
+    func importPhotos(_ results: [PHPickerResult]) {
+        logger.info("Received photo selection with \(results.count) item(s) and Photos asset identifiers.")
         processingTask?.cancel()
         activeStitchID = nil
         preview = nil
@@ -66,14 +65,14 @@ final class ContinuoViewModel {
         let importer = photosImporter
         processingTask = Task { [weak self] in
             do {
-                let imported = try await importer.importItems(items) { [weak self] progress in
+                let imported = try await importer.importItems(results) { [weak self] progress in
                     self?.preparationStatus = self?.preparationStatus(for: progress)
                 }
                 try Task.checkCancellation()
 
                 guard let self else { return }
                 appendSources(imported, cancelCurrentTask: false)
-                logger.info("Imported \(imported.count) still image(s); waiting for the user to start stitching.")
+                logger.info("Imported \(imported.count) still image(s) with Photos asset identifiers; waiting for the user to start stitching.")
                 preparationStatus = nil
                 state = .idle
                 processingTask = nil

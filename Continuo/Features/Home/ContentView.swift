@@ -1,15 +1,12 @@
 import Foundation
 import ImageIO
-import PhotosUI
 import SwiftUI
-import _PhotosUI_SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var viewModel = ContinuoViewModel()
     @State private var showingPhotosPicker = false
     @State private var showingFileImporter = false
-    @State private var photoItems: [PhotosPickerItem] = []
     @State private var draggedSourceID: UUID?
     @State private var dragTranslation: CGSize = .zero
     @State private var dragInsertionIndex: Int?
@@ -67,23 +64,11 @@ struct ContentView: View {
                 viewModel.state = .failed
             }
         }
-        .photosPicker(
-            isPresented: $showingPhotosPicker,
-            selection: $photoItems,
-            maxSelectionCount: 50,
-            selectionBehavior: .ordered,
-            matching: .images
-        )
-        .onChange(of: photoItems) { _, items in
-            guard !items.isEmpty else { return }
-            viewModel.importPhotos(items)
-        }
-        .onChange(of: showingPhotosPicker) { _, isPresented in
-            guard !isPresented else { return }
-            // Let PhotosPicker finish dismissing before clearing its binding.
-            // Mutating the selection while the picker plugin is still active
-            // can interrupt the picker connection on iOS.
-            photoItems.removeAll()
+        .sheet(isPresented: $showingPhotosPicker) {
+            OrderedPhotosPicker { results in
+                viewModel.importPhotos(results)
+                showingPhotosPicker = false
+            }
         }
         .onDisappear {
             revealTask?.cancel()
@@ -324,15 +309,10 @@ struct ContentView: View {
                                 )
                                 .offset(sourceOffset(for: source.id))
                                 .scaleEffect(draggedSourceID == source.id ? 1.04 : 1)
-                                .rotation3DEffect(
-                                    .degrees(draggedSourceID == source.id ? 0 : adjacentDragRotation(for: source.id)),
-                                    axis: (x: 0, y: 1, z: 0),
-                                    perspective: 0.35
-                                )
                                 .shadow(
-                                    color: draggedSourceID == source.id ? .black.opacity(0.28) : .clear,
-                                    radius: 18,
-                                    y: 10
+                                    color: draggedSourceID == source.id ? .cyan.opacity(0.22) : .clear,
+                                    radius: draggedSourceID == source.id ? 14 : 0,
+                                    y: draggedSourceID == source.id ? 8 : 0
                                 )
                                 .animation(.interactiveSpring(response: 0.18, dampingFraction: 0.82), value: dragInsertionIndex)
                             }
@@ -487,13 +467,6 @@ struct ContentView: View {
         return 0
     }
 
-    private func adjacentDragRotation(for sourceID: UUID) -> Double {
-        let offset = adjacentDragOffset(for: sourceID)
-        if offset < 0 { return 3.5 }
-        if offset > 0 { return -3.5 }
-        return 0
-    }
-
     private func boundedDragTranslation(for sourceID: UUID, translation: CGSize) -> CGSize {
         guard
             let frame = sourceFrames[sourceID],
@@ -610,25 +583,12 @@ struct ContentView: View {
                     .opacity(0.8)
                     .padding(18)
 
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .stroke(
-                        AngularGradient(
-                            colors: [.cyan, .blue.opacity(0.35), .purple, .pink.opacity(0.35), .cyan],
-                            center: .center
-                        ),
-                        lineWidth: isMagicRevealing ? 3 : 1
-                    )
-                    .padding(5)
-                    .rotationEffect(.degrees(Double(magicProgress) * 360))
-                    .opacity(isMagicRevealing ? 0.95 : 0.18)
-                    .blur(radius: isMagicRevealing ? 0 : 1)
-
                 Circle()
                     .fill(.white.opacity(isMagicRevealing ? 0.95 : 0))
                     .frame(width: 10, height: 10)
                     .shadow(color: .cyan.opacity(0.9), radius: 8)
                     .offset(x: (displayWidth / 2) + 20)
-                    .rotationEffect(.degrees(Double(magicProgress) * 360))
+                    .opacity(isMagicRevealing ? 0.8 : 0)
 
                 Image(preview.image, scale: 1, orientation: .up, label: Text("Stitched screenshot preview"))
                     .resizable()
@@ -636,7 +596,7 @@ struct ContentView: View {
                     .frame(width: displayWidth, height: displayHeight)
                     .padding()
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .shadow(color: .purple.opacity(0.35), radius: 18)
+                    .shadow(color: .purple.opacity(isMagicRevealing ? 0.28 : 0.16), radius: isMagicRevealing ? 14 : 10)
                     .accessibilityLabel("Stitched halo output, \(preview.pixelSize.width) by \(preview.pixelSize.height) pixels")
             }
             .padding(.vertical, 8)
@@ -754,7 +714,6 @@ struct ContentView: View {
 
     private func resetSelection() {
         viewModel.clearSources()
-        photoItems.removeAll()
         draggedSourceID = nil
         dragTranslation = .zero
         dragInsertionIndex = nil
@@ -999,13 +958,13 @@ struct ContentView: View {
 
         isMagicRevealing = true
         magicProgress = 0
-        withAnimation(.easeInOut(duration: 1.45)) {
+        withAnimation(.easeInOut(duration: 1.15)) {
             magicProgress = 1
         }
 
         revealTask = Task { @MainActor in
             do {
-                try await Task.sleep(nanoseconds: 1_650_000_000)
+                try await Task.sleep(nanoseconds: 1_300_000_000)
             } catch {
                 return
             }
