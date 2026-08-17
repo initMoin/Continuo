@@ -3,9 +3,14 @@ import Foundation
 
 public struct PreviewRenderer: Sendable {
     public var exportSettings: ExportSettings
+    private let pixelCropper: PixelRegionCropper
 
-    public init(exportSettings: ExportSettings = ExportSettings()) {
+    public init(
+        exportSettings: ExportSettings = ExportSettings(),
+        pixelCropper: PixelRegionCropper = PixelRegionCropper()
+    ) {
         self.exportSettings = exportSettings
+        self.pixelCropper = pixelCropper
     }
 
     public func render(sources: [NormalizedImage], joins: [JoinResult]) throws -> StitchPreview {
@@ -74,7 +79,7 @@ public struct PreviewRenderer: Sendable {
             let frame = translatedFrames[index]
 
             guard index > 0 else {
-                draw(
+                try draw(
                     source.image,
                     in: frame,
                     on: context,
@@ -129,7 +134,7 @@ public struct PreviewRenderer: Sendable {
             // horizontal footprint. This matters when Vision finds a small
             // cross-axis drift instead of a perfectly vertical translation.
             if overlapStartX > frame.x {
-                draw(
+                try draw(
                     source.image,
                     in: frame,
                     on: context,
@@ -143,7 +148,7 @@ public struct PreviewRenderer: Sendable {
                 )
             }
             if overlapEndX < frame.x + frame.width {
-                draw(
+                try draw(
                     source.image,
                     in: frame,
                     on: context,
@@ -159,7 +164,7 @@ public struct PreviewRenderer: Sendable {
 
             let commonWidth = overlapEndX - overlapStartX
             if overlapStartInSource > 0 {
-                draw(
+                try draw(
                     source.image,
                     in: frame,
                     on: context,
@@ -181,7 +186,7 @@ public struct PreviewRenderer: Sendable {
                     let bandEnd = featherStart + (featherHeight * Double(bandIndex + 1) / Double(bandCount))
                     let bandCenter = (bandStart + bandEnd) / 2
                     let alpha = CGFloat((bandCenter - featherStart) / featherHeight)
-                    draw(
+                    try draw(
                         source.image,
                         in: frame,
                         on: context,
@@ -199,7 +204,7 @@ public struct PreviewRenderer: Sendable {
 
             let fullStart = max(frame.y + featherEnd, frame.y + overlapStartInSource)
             if fullStart < frame.y + frame.height {
-                draw(
+                try draw(
                     source.image,
                     in: frame,
                     on: context,
@@ -230,7 +235,26 @@ public struct PreviewRenderer: Sendable {
         canvasHeight: Int,
         clip: CGRect? = nil,
         alpha: CGFloat = 1
-    ) {
+    ) throws {
+        if let clip,
+           isIntegral(clip),
+           let sourceRect = sourceRect(for: clip, in: frame),
+           isIntegral(sourceRect),
+           sourceRect.width > 0,
+           sourceRect.height > 0 {
+            let cropped: CGImage
+            do {
+                cropped = try pixelCropper.crop(image, to: Rect2D(sourceRect))
+            } catch let error as PixelCropError {
+                throw ContinuoError.pixelCropFailed(error)
+            }
+            context.saveGState()
+            context.setAlpha(alpha)
+            context.draw(cropped, in: bottomLeftRect(clip, canvasHeight: canvasHeight))
+            context.restoreGState()
+            return
+        }
+
         context.saveGState()
         if let clip {
             context.clip(to: bottomLeftRect(clip, canvasHeight: canvasHeight))
@@ -238,6 +262,24 @@ public struct PreviewRenderer: Sendable {
         context.setAlpha(alpha)
         context.draw(image, in: bottomLeftRect(frame.cgRect, canvasHeight: canvasHeight))
         context.restoreGState()
+    }
+
+    private func sourceRect(for outputRect: CGRect, in frame: Rect2D) -> CGRect? {
+        let sourceRect = CGRect(
+            x: outputRect.minX - frame.x,
+            y: outputRect.minY - frame.y,
+            width: outputRect.width,
+            height: outputRect.height
+        )
+        let imageBounds = CGRect(x: 0, y: 0, width: frame.width, height: frame.height)
+        return imageBounds.contains(sourceRect) ? sourceRect : nil
+    }
+
+    private func isIntegral(_ rect: CGRect) -> Bool {
+        abs(rect.origin.x.rounded() - rect.origin.x) < 0.0001 &&
+        abs(rect.origin.y.rounded() - rect.origin.y) < 0.0001 &&
+        abs(rect.size.width.rounded() - rect.size.width) < 0.0001 &&
+        abs(rect.size.height.rounded() - rect.size.height) < 0.0001
     }
 
     private func surgicalSeamPosition(

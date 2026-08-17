@@ -44,6 +44,54 @@ final class ContinuoTests: XCTestCase {
         XCTAssertTrue(imported.allSatisfy { $0.localURL != $0.originalSourceURL })
     }
 
+    func testPixelRegionCropperPreservesExactPixelWindow() throws {
+        let values: [[Float]] = [
+            [0.05, 0.15, 0.25, 0.35],
+            [0.45, 0.55, 0.65, 0.75],
+            [0.85, 0.95, 0.10, 0.20]
+        ]
+        let image = try XCTUnwrap(makeTestImage(values: values))
+
+        let cropped = try PixelRegionCropper().crop(
+            image,
+            to: Rect2D(x: 1, y: 1, width: 2, height: 2)
+        )
+        let data = try XCTUnwrap(cropped.dataProvider?.data as Data?)
+        let redValues = (0..<cropped.height).flatMap { y in
+            (0..<cropped.width).map { x in
+                data[(y * cropped.bytesPerRow) + (x * 4)]
+            }
+        }
+
+        XCTAssertEqual(cropped.width, 2)
+        XCTAssertEqual(cropped.height, 2)
+        XCTAssertEqual(redValues, [140, 165, 242, 25])
+    }
+
+    func testPixelRegionCropperRejectsInvalidAndOutOfBoundsRegions() throws {
+        let image = try XCTUnwrap(makeTestImage(width: 4, rows: [0.1, 0.2, 0.3]))
+        let cropper = PixelRegionCropper()
+
+        XCTAssertThrowsError(
+            try cropper.crop(image, to: Rect2D(x: 0, y: 0, width: 0, height: 1))
+        ) { error in
+            XCTAssertEqual(
+                error as? PixelCropError,
+                .invalidRectangle(Rect2D(x: 0, y: 0, width: 0, height: 1))
+            )
+        }
+
+        XCTAssertThrowsError(
+            try cropper.crop(image, to: Rect2D(x: 3, y: 2, width: 2, height: 1))
+        ) { error in
+            guard case let .rectangleOutOfBounds(rectangle, imageSize) = error as? PixelCropError else {
+                return XCTFail("Expected an out-of-bounds crop error, got \(error).")
+            }
+            XCTAssertEqual(rectangle, Rect2D(x: 3, y: 2, width: 2, height: 1))
+            XCTAssertEqual(imageSize, PixelSize(width: 4, height: 3))
+        }
+    }
+
     func testSourceDeletionRemovesOriginalFileButNotImportedWorkingCopy() async throws {
         let originalURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("continuo-delete-original-\(UUID().uuidString).png")

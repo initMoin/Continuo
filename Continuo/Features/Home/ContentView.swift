@@ -6,7 +6,7 @@ import _PhotosUI_SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
-    @StateObject private var viewModel = ContinuoViewModel()
+    @State private var viewModel = ContinuoViewModel()
     @State private var showingPhotosPicker = false
     @State private var showingFileImporter = false
     @State private var photoItems: [PhotosPickerItem] = []

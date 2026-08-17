@@ -1,9 +1,8 @@
 import Foundation
-import Combine
+import Observation
 import PhotosUI
 import _PhotosUI_SwiftUI
 import OSLog
-import SwiftUI
 
 enum SourceCleanupState: Equatable {
     case hidden
@@ -14,7 +13,8 @@ enum SourceCleanupState: Equatable {
 }
 
 @MainActor
-final class ContinuoViewModel: ObservableObject {
+@Observable
+final class ContinuoViewModel {
     enum ProcessingState: Equatable {
         case idle
         case processing(StitchProgress)
@@ -24,15 +24,15 @@ final class ContinuoViewModel: ObservableObject {
         case cancelled
     }
 
-    @Published var sources: [SourceImage] = []
-    @Published var preview: StitchPreview?
-    @Published var state: ProcessingState = .idle
-    @Published var errorMessage: String?
-    @Published var recoverySuggestion: String?
-    @Published var selectedJoinDiagnostics: JoinDiagnostics?
-    @Published var sourceCleanupState: SourceCleanupState = .hidden
-    @Published var sourceCleanupError: String?
-    @Published var preparationStatus: String?
+    var sources: [SourceImage] = []
+    var preview: StitchPreview?
+    var state: ProcessingState = .idle
+    var errorMessage: String?
+    var recoverySuggestion: String?
+    var selectedJoinDiagnostics: JoinDiagnostics?
+    var sourceCleanupState: SourceCleanupState = .hidden
+    var sourceCleanupError: String?
+    var preparationStatus: String?
 
     private let photosImporter = PhotosImageImporter()
     private let filesImporter = FileImageImporter()
@@ -41,7 +41,7 @@ final class ContinuoViewModel: ObservableObject {
     private var processingTask: Task<Void, Never>?
     private let logger = Logger(subsystem: "dev.iamshift.Continuo", category: "stitching")
 
-    deinit {
+    isolated deinit {
         processingTask?.cancel()
     }
 
@@ -98,7 +98,9 @@ final class ContinuoViewModel: ObservableObject {
     }
 
     func removeSources(at offsets: IndexSet) {
-        sources.remove(atOffsets: offsets)
+        for index in offsets.sorted(by: >) where sources.indices.contains(index) {
+            sources.remove(at: index)
+        }
         resetResult()
     }
 
@@ -229,9 +231,7 @@ final class ContinuoViewModel: ObservableObject {
                 self?.state = .processing(progress)
             }
         }
-        return try await Task.detached(priority: .userInitiated) {
-            try await engine.stitch(sources: selectedSources, progress: progressHandler)
-        }.value
+        return try await engine.stitch(sources: selectedSources, progress: progressHandler)
     }
 
     private func resetResult(cancelCurrentTask: Bool = true) {

@@ -1,0 +1,12 @@
+# Xcode user and build state
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+
+# Test and profiling output
+*.xcresult/
+*.profraw
+
+# macOS metadata
+.DS_Store

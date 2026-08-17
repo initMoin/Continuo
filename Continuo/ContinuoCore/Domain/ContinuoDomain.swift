@@ -406,6 +406,7 @@ public enum ContinuoError: Error, LocalizedError, Sendable {
     case importFailed(String)
     case imageDecodeFailed(String)
     case registrationFailed(JoinResult)
+    case pixelCropFailed(PixelCropError)
     case renderingFailed(String)
     case outputTooLarge(PixelSize)
     case cancelled
@@ -428,6 +429,8 @@ public enum ContinuoError: Error, LocalizedError, Sendable {
             "Continuo could not decode \(name)."
         case let .registrationFailed(join):
             join.diagnostics.message
+        case let .pixelCropFailed(error):
+            error.localizedDescription
         case let .renderingFailed(message):
             message
         case let .outputTooLarge(size):
