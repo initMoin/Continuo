@@ -1,9 +1,14 @@
 import Foundation
-import ImageIO
+import CoreGraphics
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    private enum ExportTarget {
+        case current
+        case history
+    }
+
     @State private var viewModel = ContinuoViewModel()
     @State private var showingPhotosPicker = false
     @State private var showingFileImporter = false
@@ -19,10 +24,15 @@ struct ContentView: View {
     @State private var exportDocument: StitchedImageDocument?
     @State private var showingExport = false
     @State private var showingSaveOptions = false
+    @State private var exportTarget: ExportTarget?
+    @State private var historyExportID: UUID?
     @State private var exportError: String?
     @State private var isSavingToPhotos = false
     @State private var showingSaveConfirmation = false
     @State private var showingDeleteConfirmation = false
+    @State private var historyShareID: UUID?
+    @State private var showingHistoryShareMenu = false
+    @State private var showingHistoryDeleteConfirmation = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     private let photosExporter = PhotosImageExporter()
@@ -38,6 +48,14 @@ struct ContentView: View {
                             Label("Photos", systemImage: "photo.on.rectangle.angled")
                         }
                         .accessibilityHint("Select screenshots from Photos")
+                        .disabled(isProcessing || isPreparing)
+
+                        Button {
+                            viewModel.autoSelectScreenshots()
+                        } label: {
+                            Label("Auto-select", systemImage: "wand.and.stars")
+                        }
+                        .accessibilityHint("Find nearby Photos screenshots that appear to fit together")
                         .disabled(isProcessing || isPreparing)
 
                         Button {
@@ -81,11 +99,17 @@ struct ContentView: View {
         ) { result in
             switch result {
             case .success:
-                viewModel.markSaveCompleted()
+                if case .current? = exportTarget {
+                    viewModel.markSaveCompleted()
+                } else if case .history? = exportTarget, let historyExportID {
+                    viewModel.consumeHistoryAsset(id: historyExportID)
+                }
             case let .failure(error):
                 exportError = error.localizedDescription
             }
             exportDocument = nil
+            exportTarget = nil
+            historyExportID = nil
         }
         .alert(
             "Couldn’t save stitched image",
@@ -119,73 +143,55 @@ struct ContentView: View {
         } message: {
             Text("This deletes the original selected images from their source locations. The stitched output will not be deleted.")
         }
+        .confirmationDialog(
+            "Delete source images?",
+            isPresented: $showingHistoryDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                guard let historyShareID else { return }
+                Task {
+                    await viewModel.deleteCompletedStitchSources(id: historyShareID)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes only the original images associated with this saved stitch. The stitched result stays available.")
+        }
     }
 
     private var previewDetail: some View {
-        ZStack {
-            ScrollViewReader { scrollProxy in
-                ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 20) {
-                        pageHeader
+        GeometryReader { viewport in
+            let pageWidth = max(1, viewport.size.width)
+            let pageHeight = max(1, viewport.size.height)
 
-                        if let preparationStatus = viewModel.preparationStatus {
-                            preparationView(status: preparationStatus)
-                        }
+            ZStack {
+                ScrollView(.horizontal) {
+                    LazyHStack(alignment: .top, spacing: 0) {
+                        workflowPage
+                            .frame(width: pageWidth, height: pageHeight, alignment: .top)
 
-                        if !viewModel.sources.isEmpty {
-                            sourceStrip(
-                                magicProgress: isMagicRevealing ? magicProgress : 0,
-                                isLocked: isSourceInteractionLocked
-                            )
-                        }
-
-                        if isPreparing {
-                            EmptyView()
-                        } else if isProcessing {
-                            processingView
-                        } else if let errorMessage = viewModel.errorMessage {
-                            failureView(message: errorMessage)
-                        } else if let preview = viewModel.preview {
-                            stitchedPreviewView(preview)
-                                .id(stitchedOutputAnchor)
-                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                        } else if viewModel.sources.count >= 2 {
-                            stitchActionView
-                        } else {
-                            ContentUnavailableView(
-                                "Select another screenshot",
-                                systemImage: "photo.on.rectangle.angled",
-                                description: Text("Continuo keeps the selection order. Once at least two still images are imported, you can start stitching.")
-                            )
-                            .frame(maxWidth: .infinity, minHeight: 300)
+                        ForEach(viewModel.completedStitches) { stitch in
+                            historyPage(stitch)
+                                .frame(width: pageWidth, height: pageHeight, alignment: .top)
+                                .transition(
+                                    .asymmetric(
+                                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                                        removal: .opacity
+                                    )
+                                )
                         }
                     }
-                    .frame(maxWidth: 960, alignment: .leading)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 18)
-                    .padding(.bottom, 48)
+                    .scrollTargetLayout()
                 }
                 .scrollIndicators(.hidden)
-                .onChange(of: viewModel.state) { _, state in
-                    if case let .processing(progress) = state {
-                        stopMagicReveal()
-                        updateProcessingProgress(progress)
-                    } else if case .ready = state, viewModel.preview != nil {
-                        startMagicReveal()
-                        Task { @MainActor in
-                            await Task.yield()
-                            withAnimation(.easeInOut(duration: 0.65)) {
-                                scrollProxy.scrollTo(stitchedOutputAnchor, anchor: .top)
-                            }
-                        }
-                    }
-                }
-            }
+                .scrollTargetBehavior(.viewAligned)
 
-            if case let .processing(progress) = viewModel.state {
-                stitchingProgressOverlay(progress)
-                    .transition(.opacity)
-                    .zIndex(10)
+                if case let .processing(progress) = viewModel.state {
+                    stitchingProgressOverlay(progress)
+                        .transition(.opacity)
+                        .zIndex(10)
+                }
             }
         }
         .navigationTitle("Continuo")
@@ -196,21 +202,83 @@ struct ContentView: View {
 
     private let stitchedOutputAnchor = "stitched-output"
 
-    private var pageHeader: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Label("New stitch", systemImage: "rectangle.stack.badge.plus")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.tint)
+    private var workflowPage: some View {
+        ScrollViewReader { scrollProxy in
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 20) {
+                    if let preparationStatus = viewModel.preparationStatus {
+                        preparationView(status: preparationStatus)
+                    }
 
-            Text("From fragments to the full view.")
-                .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                    if shouldShowSourceStrip {
+                        sourceStrip(
+                            magicProgress: isMagicRevealing ? magicProgress : 0,
+                            isLocked: isSourceInteractionLocked
+                        )
+                    }
 
-            Text("Select screenshots in order, adjust the sequence if needed, then let Continuo find the shared edges.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                    if isPreparing {
+                        EmptyView()
+                    } else if isProcessing {
+                        processingView
+                    } else if let errorMessage = viewModel.errorMessage {
+                        failureView(message: errorMessage)
+                    } else if let preview = viewModel.preview {
+                        stitchedPreviewView(preview)
+                            .id(stitchedOutputAnchor)
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    } else if viewModel.sources.count >= 2 {
+                        stitchActionView
+                    } else {
+                        ContentUnavailableView(
+                            "Select screenshots",
+                            systemImage: "photo.on.rectangle.angled",
+                            description: Text("Choose at least two still images from Photos or Files to begin.")
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 300)
+                    }
+                }
+                .frame(maxWidth: 960, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 48)
+            }
+            .scrollIndicators(.hidden)
+            .onChange(of: viewModel.state) { _, state in
+                if case let .processing(progress) = state {
+                    stopMagicReveal()
+                    updateProcessingProgress(progress)
+                } else if case .ready = state, viewModel.preview != nil {
+                    startMagicReveal()
+                    Task { @MainActor in
+                        await Task.yield()
+                        withAnimation(.easeInOut(duration: 0.65)) {
+                            scrollProxy.scrollTo(stitchedOutputAnchor, anchor: .top)
+                        }
+                    }
+                }
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func historyPage(_ stitch: CompletedStitch) -> some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .center, spacing: 16) {
+                completedHistoryCard(stitch)
+            }
+            .frame(maxWidth: 960, alignment: .center)
+            .padding(.horizontal, 20)
+            .padding(.top, 24)
+            .padding(.bottom, 48)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .scrollIndicators(.hidden)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Saved stitched image history item")
+    }
+
+    private var shouldShowSourceStrip: Bool {
+        !viewModel.sources.isEmpty && viewModel.sourceCleanupState != .deleted
     }
 
     private func preparationView(status: String) -> some View {
@@ -250,14 +318,10 @@ struct ContentView: View {
 
     private var stitchActionView: some View {
         VStack(spacing: 12) {
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(.tint)
-
             Text("Ready to stitch")
                 .font(.headline)
 
-            Text("The screenshots above will be registered in the order you selected them.")
+            Text("Stitch the screenshots in the order shown above.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -266,14 +330,14 @@ struct ContentView: View {
             Button {
                 viewModel.stitch()
             } label: {
-                Label("Stitch Screenshots", systemImage: "rectangle.stack.badge.plus")
-                    .frame(minWidth: 180)
+                Label("Stitch", systemImage: "wand.and.stars")
+                    .frame(minWidth: 140)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .accessibilityHint("Register adjacent screenshots and render the stitched preview")
         }
-        .frame(maxWidth: .infinity, minHeight: 220)
+        .frame(maxWidth: .infinity, minHeight: 170)
         .padding(24)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .accessibilityElement(children: .contain)
@@ -291,8 +355,8 @@ struct ContentView: View {
 
             Text(
                 isLocked
-                    ? "Order locked while the stitched result is shown."
-                    : "Drag screenshots to adjust their stitching order."
+                    ? "Order locked after stitching."
+                    : "Drag to reorder before stitching."
             )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -320,10 +384,14 @@ struct ContentView: View {
                             .zIndex(draggedSourceID == source.id ? 10 : 0)
                             .background {
                                 GeometryReader { proxy in
-                                    Color.clear.preference(
-                                        key: SourceFramePreferenceKey.self,
-                                        value: [source.id: proxy.frame(in: .named("sourceStrip"))]
-                                    )
+                                    if proxy.size.width > 0, proxy.size.height > 0 {
+                                        Color.clear.preference(
+                                            key: SourceFramePreferenceKey.self,
+                                            value: [source.id: proxy.frame(in: .named("sourceStrip"))]
+                                        )
+                                    } else {
+                                        Color.clear
+                                    }
                                 }
                             }
                             .highPriorityGesture(sourceDragGesture(for: source))
@@ -340,6 +408,7 @@ struct ContentView: View {
                 .scrollDisabled(draggedSourceID != nil || isLocked)
                 .allowsHitTesting(!isLocked)
             }
+            .frame(minHeight: 270)
             .coordinateSpace(name: "sourceStrip")
             .onPreferenceChange(SourceFramePreferenceKey.self) { frames in
                 sourceFrames = frames
@@ -355,7 +424,6 @@ struct ContentView: View {
             .onPreferenceChange(SourceContainerFramePreferenceKey.self) { frame in
                 sourceContainerFrame = frame
             }
-            .frame(minHeight: 270)
         }
         .padding(16)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -551,8 +619,8 @@ struct ContentView: View {
     private func stitchedPreviewView(_ preview: StitchPreview) -> some View {
         let pixelWidth = max(CGFloat(1), CGFloat(preview.pixelSize.width))
         let pixelHeight = max(CGFloat(1), CGFloat(preview.pixelSize.height))
-        let maximumDisplayWidth: CGFloat = horizontalSizeClass == .compact ? 340 : 520
-        let maximumDisplayHeight: CGFloat = 680
+        let maximumDisplayWidth: CGFloat = horizontalSizeClass == .compact ? 350 : 760
+        let maximumDisplayHeight: CGFloat = horizontalSizeClass == .compact ? 760 : 900
         let displayScale = min(
             1,
             maximumDisplayWidth / pixelWidth,
@@ -563,7 +631,7 @@ struct ContentView: View {
 
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label("Halo output", systemImage: "sparkles")
+                Text("Stitched result")
                     .font(.headline)
                 Spacer()
                 Text("\(preview.pixelSize.width) × \(preview.pixelSize.height) px")
@@ -594,16 +662,14 @@ struct ContentView: View {
                     .resizable()
                     .interpolation(.high)
                     .frame(width: displayWidth, height: displayHeight)
-                    .padding()
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                    .shadow(color: .purple.opacity(isMagicRevealing ? 0.28 : 0.16), radius: isMagicRevealing ? 14 : 10)
-                    .accessibilityLabel("Stitched halo output, \(preview.pixelSize.width) by \(preview.pixelSize.height) pixels")
+                    .accessibilityLabel("Stitched result, \(preview.pixelSize.width) by \(preview.pixelSize.height) pixels")
             }
             .padding(.vertical, 8)
 
             HStack {
                 Button {
                     showingSaveOptions = true
+                    exportTarget = .current
                 } label: {
                     Label(
                         isSavingToPhotos ? "Saving…" : "Save",
@@ -634,6 +700,127 @@ struct ContentView: View {
         }
     }
 
+    private func completedHistoryCard(_ stitch: CompletedStitch) -> some View {
+        let maximumDisplayWidth: CGFloat = horizontalSizeClass == .compact ? 350 : 900
+        let sourceWidth = max(1, CGFloat(stitch.pixelSize.width))
+        let sourceHeight = max(1, CGFloat(stitch.pixelSize.height))
+
+        return VStack(alignment: .center, spacing: 10) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(
+                    stitch.thumbnail,
+                    scale: 1,
+                    orientation: .up,
+                    label: Text("Saved stitched screenshot")
+                )
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(sourceWidth / sourceHeight, contentMode: .fit)
+                .frame(maxWidth: maximumDisplayWidth)
+                .accessibilityLabel(
+                    "Saved stitched result, \(stitch.pixelSize.width) by \(stitch.pixelSize.height) pixels"
+                )
+
+                if stitch.fullResolutionURL != nil || (!stitch.sourceImagesDeleted && !stitch.sources.isEmpty) {
+                    Button {
+                        historyShareID = stitch.id
+                        showingHistoryShareMenu = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 19, weight: .semibold))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(.tint)
+                            .frame(width: 44, height: 44)
+                            .background(.thinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(12)
+                    .disabled(stitch.sourceDeletionInProgress)
+                    .accessibilityLabel("Share or manage this stitched image")
+                    .popover(
+                        isPresented: Binding(
+                            get: { showingHistoryShareMenu && historyShareID == stitch.id },
+                            set: { isPresented in
+                                showingHistoryShareMenu = isPresented
+                            }
+                        ),
+                        attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)),
+                        arrowEdge: .bottom
+                    ) {
+                        historyActionsPopover(for: stitch)
+                            .presentationCompactAdaptation(.popover)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            Text("\(stitch.pixelSize.width) × \(stitch.pixelSize.height) px")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            if stitch.sourceDeletionInProgress {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Deleting source images…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let sourceDeletionError = stitch.sourceDeletionError {
+                Label(sourceDeletionError, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func historyActionsPopover(for stitch: CompletedStitch) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Stitch actions")
+                .font(.headline)
+
+            Text("Save this stitch or manage its original source images.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if stitch.fullResolutionURL != nil {
+                Button {
+                    showingHistoryShareMenu = false
+                    saveHistoryToPhotos(id: stitch.id)
+                } label: {
+                    Label("Save to Photos", systemImage: "photo")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    showingHistoryShareMenu = false
+                    prepareHistoryExport(for: stitch)
+                } label: {
+                    Label("Save to Files", systemImage: "folder")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if !stitch.sourceImagesDeleted, !stitch.sources.isEmpty {
+                Button(role: .destructive) {
+                    showingHistoryShareMenu = false
+                    showingHistoryDeleteConfirmation = true
+                } label: {
+                    Label("Delete source images", systemImage: "trash")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(18)
+        .frame(width: 250)
+    }
+
     @ViewBuilder
     private var sourceCleanupView: some View {
         switch viewModel.sourceCleanupState {
@@ -641,7 +828,7 @@ struct ContentView: View {
             EmptyView()
         case .available:
             VStack(alignment: .leading, spacing: 10) {
-                Text("The stitched image is saved. You can now remove the original selected images from their source locations.")
+                Text("Saved. You can remove the original selected images or reset this workflow.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -669,7 +856,7 @@ struct ContentView: View {
             .padding(.top, 4)
         case .deleted:
             VStack(alignment: .leading, spacing: 10) {
-                Label("Original selected images deleted.", systemImage: "checkmark.circle.fill")
+                Label("Original images deleted.", systemImage: "checkmark.circle.fill")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.green)
                 resetSelectionButton
@@ -713,7 +900,9 @@ struct ContentView: View {
     }
 
     private func resetSelection() {
-        viewModel.clearSources()
+        withAnimation(.easeInOut(duration: 0.45)) {
+            viewModel.resetActiveWorkflow()
+        }
         draggedSourceID = nil
         dragTranslation = .zero
         dragInsertionIndex = nil
@@ -735,7 +924,7 @@ struct ContentView: View {
                     color: .blue
                 ) {
                     showingSaveOptions = false
-                    saveToPhotos(preview)
+                    saveToPhotos(preview.image, target: .current)
                 }
 
                 saveDestinationButton(
@@ -744,7 +933,7 @@ struct ContentView: View {
                     color: .orange
                 ) {
                     showingSaveOptions = false
-                    prepareExport(for: preview)
+                    prepareExport(for: preview.image, target: .current)
                 }
             }
         }
@@ -781,24 +970,65 @@ struct ContentView: View {
         .accessibilityLabel("Save to \(title)")
     }
 
-    private func prepareExport(for preview: StitchPreview) {
+    private func prepareExport(for image: CGImage, target: ExportTarget) {
         do {
-            exportDocument = try StitchedImageDocument(image: preview.image)
+            exportDocument = try StitchedImageDocument(image: image)
+            exportTarget = target
+            historyExportID = nil
             showingExport = true
         } catch {
             exportError = error.localizedDescription
         }
     }
 
-    private func saveToPhotos(_ preview: StitchPreview) {
+    private func prepareHistoryExport(for stitch: CompletedStitch) {
+        guard let fileURL = viewModel.historyExportURL(for: stitch.id) else {
+            exportError = "The full-resolution history image is no longer available."
+            return
+        }
+
+        do {
+            exportDocument = try StitchedImageDocument(fileURL: fileURL)
+            exportTarget = .history
+            historyExportID = stitch.id
+            showingExport = true
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    private func saveToPhotos(_ image: CGImage, target: ExportTarget) {
         guard !isSavingToPhotos else { return }
         isSavingToPhotos = true
 
         Task { @MainActor in
             do {
-                try await photosExporter.save(preview.image)
+                try await photosExporter.save(image)
                 isSavingToPhotos = false
-                viewModel.markSaveCompleted()
+                if case .current = target {
+                    viewModel.markSaveCompleted()
+                }
+                showingSaveConfirmation = true
+            } catch {
+                isSavingToPhotos = false
+                exportError = error.localizedDescription
+            }
+        }
+    }
+
+    private func saveHistoryToPhotos(id: UUID) {
+        guard !isSavingToPhotos else { return }
+        guard let fileURL = viewModel.historyExportURL(for: id) else {
+            exportError = "The full-resolution history image is no longer available."
+            return
+        }
+
+        isSavingToPhotos = true
+        Task { @MainActor in
+            do {
+                try await photosExporter.save(fileURL: fileURL)
+                viewModel.consumeHistoryAsset(id: id)
+                isSavingToPhotos = false
                 showingSaveConfirmation = true
             } catch {
                 isSavingToPhotos = false
@@ -1088,19 +1318,43 @@ private struct ScreenshotThumbnail: View {
     }
 
     private func makeThumbnail() -> CGImage? {
-        guard let imageSource = CGImageSourceCreateWithURL(source.localURL as CFURL, nil) else {
+        // Use the same platform-normalized raster as the stitching engine.
+        // This keeps thumbnails out of Image I/O's direct thumbnail decoder,
+        // which is the path that emits the BGRx8/10-bpc diagnostic for some
+        // HEIF sources.
+        guard let normalized = try? ImageNormalizer().normalize(source) else {
             return nil
         }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 640,
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+        return downsample(normalized.image, maximumPixelSize: 640)
+    }
+
+    private func downsample(_ image: CGImage, maximumPixelSize: Int) -> CGImage? {
+        let longestSide = max(image.width, image.height)
+        guard longestSide > maximumPixelSize else {
+            return image
+        }
+
+        let scale = CGFloat(maximumPixelSize) / CGFloat(longestSide)
+        let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
+        let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
+        guard
+            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+            let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        else {
             return nil
         }
-        return cgImage
+
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
     }
 }
 

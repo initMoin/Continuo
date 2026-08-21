@@ -91,7 +91,7 @@ public struct PreviewRenderer: Sendable {
 
             let overlapStartInSource = max(0, overlapStartY - frame.y)
             let overlapEndInSource = min(frame.height, overlapEndY - frame.y)
-            seamPositions[index] = surgicalSeamPosition(
+            seamPositions[index] = try surgicalSeamPosition(
                 previous: previous,
                 incoming: source,
                 previousFrame: previousFrame,
@@ -127,7 +127,7 @@ public struct PreviewRenderer: Sendable {
         overlapEndX: Double,
         overlapStartInSource: Double,
         overlapEndInSource: Double
-    ) -> Double {
+    ) throws -> Double {
         let overlapHeight = overlapEndInSource - overlapStartInSource
         guard overlapHeight >= 4 else {
             return overlapStartInSource + (overlapHeight / 2)
@@ -144,10 +144,11 @@ public struct PreviewRenderer: Sendable {
         let xStep = max(1, (xEnd - xStart + 1) / 512)
         let previousRepresentation = previous.matchingRepresentation
         let incomingRepresentation = incoming.matchingRepresentation
-        var bestY = overlapStartInSource + (overlapHeight / 2)
+        let searchStep = max(1, Int(overlapHeight) / 512)
+        var bestY = Double(firstCandidate)
         var bestCost = Double.greatestFiniteMagnitude
 
-        for candidateY in firstCandidate...lastCandidate {
+        func cost(for candidateY: Int) -> Double? {
             let incomingY = min(incomingRepresentation.height - 1, max(0, candidateY))
             let previousY = min(
                 previousRepresentation.height - 1,
@@ -176,17 +177,56 @@ public struct PreviewRenderer: Sendable {
                 sampleCount += 1
             }
 
-            guard sampleCount > 0 else { continue }
+            guard sampleCount > 0 else { return nil }
             let normalizedDisagreement = disagreement / Double(sampleCount)
             let normalizedDetail = min(1.0, detail / Double(sampleCount))
             let distanceFromCenter = abs(Double(candidateY) - (overlapStartInSource + overlapHeight / 2)) / overlapHeight
-            let cost = (normalizedDisagreement * 0.60) + (normalizedDetail * 0.35) + (distanceFromCenter * 0.05)
+            return (normalizedDisagreement * 0.60) + (normalizedDetail * 0.35) + (distanceFromCenter * 0.05)
+        }
 
+        func consider(_ candidateY: Int) {
+            guard let cost = cost(for: candidateY) else { return }
             if cost < bestCost - 0.0001 ||
-                (abs(cost - bestCost) <= 0.0001 && abs(Double(candidateY) - (overlapStartInSource + overlapHeight / 2)) < abs(bestY - (overlapStartInSource + overlapHeight / 2))) {
+                (abs(cost - bestCost) <= 0.0001 &&
+                    abs(Double(candidateY) - (overlapStartInSource + overlapHeight / 2)) <
+                    abs(bestY - (overlapStartInSource + overlapHeight / 2))) {
                 bestCost = cost
                 bestY = Double(candidateY)
             }
+        }
+
+        for candidateY in stride(from: firstCandidate, through: lastCandidate, by: searchStep) {
+            if candidateY.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
+            consider(candidateY)
+        }
+        if (lastCandidate - firstCandidate) % searchStep != 0 {
+            consider(lastCandidate)
+        }
+
+        guard searchStep > 1 else { return bestY }
+
+        let phaseStart = firstCandidate + max(1, searchStep / 2)
+        if phaseStart <= lastCandidate {
+            for candidateY in stride(from: phaseStart, through: lastCandidate, by: searchStep) {
+                if candidateY.isMultiple(of: 64) {
+                    try Task.checkCancellation()
+                }
+                consider(candidateY)
+            }
+            if (lastCandidate - phaseStart) % searchStep != 0 {
+                consider(lastCandidate)
+            }
+        }
+
+        let refinementStart = max(firstCandidate, Int(bestY) - searchStep)
+        let refinementEnd = min(lastCandidate, Int(bestY) + searchStep)
+        for candidateY in refinementStart...refinementEnd {
+            if candidateY.isMultiple(of: 64) {
+                try Task.checkCancellation()
+            }
+            consider(candidateY)
         }
 
         return bestY

@@ -3,6 +3,12 @@ import CoreGraphics
 import CoreImage
 import Foundation
 import ImageIO
+#if canImport(AppKit)
+import AppKit
+#endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public struct MatchingRepresentation: Equatable, Sendable {
     public let width: Int
@@ -10,26 +16,61 @@ public struct MatchingRepresentation: Equatable, Sendable {
     public let grayscale: [Float]
     public let edgeMagnitude: [Float]
     public let verticalGradient: [Float]
+    /// Full-resolution row statistics used to seed vertical registration.
+    ///
+    /// These are calculated once during normalization and reused for every
+    /// adjacent pair. They do not replace the source pixels or alter the
+    /// registration representation; they avoid rescanning the same pixels for
+    /// each pair in a multi-screenshot stitch.
+    public let rowMeans: [Float]
+    public let rowVariances: [Float]
+    public let rowEdgeEnergy: [Float]
 
     public init(
         width: Int,
         height: Int,
         grayscale: [Float],
         edgeMagnitude: [Float]? = nil,
-        verticalGradient: [Float]? = nil
+        verticalGradient: [Float]? = nil,
+        rowMeans: [Float]? = nil,
+        rowVariances: [Float]? = nil,
+        rowEdgeEnergy: [Float]? = nil
     ) {
         self.width = width
         self.height = height
         self.grayscale = grayscale
+        let resolvedEdgeMagnitude: [Float]
         if let edgeMagnitude, edgeMagnitude.count == grayscale.count {
-            self.edgeMagnitude = edgeMagnitude
+            resolvedEdgeMagnitude = edgeMagnitude
         } else {
-            self.edgeMagnitude = Self.makeEdgeMagnitude(from: grayscale, width: width, height: height)
+            resolvedEdgeMagnitude = Self.makeEdgeMagnitude(from: grayscale, width: width, height: height)
         }
+        self.edgeMagnitude = resolvedEdgeMagnitude
         if let verticalGradient, verticalGradient.count == grayscale.count {
             self.verticalGradient = verticalGradient
         } else {
             self.verticalGradient = Self.makeVerticalGradient(from: grayscale, width: width, height: height)
+        }
+
+        if let rowMeans,
+           let rowVariances,
+           let rowEdgeEnergy,
+           rowMeans.count == height,
+           rowVariances.count == height,
+           rowEdgeEnergy.count == height {
+            self.rowMeans = rowMeans
+            self.rowVariances = rowVariances
+            self.rowEdgeEnergy = rowEdgeEnergy
+        } else {
+            let statistics = Self.makeRowStatistics(
+                from: grayscale,
+                edgeMagnitude: resolvedEdgeMagnitude,
+                width: width,
+                height: height
+            )
+            self.rowMeans = statistics.means
+            self.rowVariances = statistics.variances
+            self.rowEdgeEnergy = statistics.edgeEnergy
         }
     }
 
@@ -96,6 +137,48 @@ public struct MatchingRepresentation: Equatable, Sendable {
         vDSP_vsdiv(edges, 1, &divisor, &edges, 1, vDSP_Length(edges.count))
         return edges
     }
+
+    private static func makeRowStatistics(
+        from grayscale: [Float],
+        edgeMagnitude: [Float],
+        width: Int,
+        height: Int
+    ) -> (means: [Float], variances: [Float], edgeEnergy: [Float]) {
+        guard width > 0, height > 0, grayscale.count == width * height else {
+            return (
+                means: [Float](repeating: 0, count: max(0, height)),
+                variances: [Float](repeating: 0, count: max(0, height)),
+                edgeEnergy: [Float](repeating: 0, count: max(0, height))
+            )
+        }
+
+        var means = [Float](repeating: 0, count: height)
+        var variances = [Float](repeating: 0, count: height)
+        var edgeEnergy = [Float](repeating: 0, count: height)
+        let rowWidth = Float(width)
+
+        for y in 0..<height {
+            let rowStart = y * width
+            var sum: Float = 0
+            var squaredSum: Float = 0
+            var edgeSum: Float = 0
+            for x in 0..<width {
+                let index = rowStart + x
+                let value = grayscale[index]
+                sum += value
+                squaredSum += value * value
+                if index < edgeMagnitude.count {
+                    edgeSum += edgeMagnitude[index]
+                }
+            }
+            let mean = sum / rowWidth
+            means[y] = mean
+            variances[y] = max(0, (squaredSum / rowWidth) - (mean * mean))
+            edgeEnergy[y] = edgeSum / rowWidth
+        }
+
+        return (means, variances, edgeEnergy)
+    }
 }
 
 public struct NormalizedImage: @unchecked Sendable {
@@ -156,36 +239,91 @@ public struct ImageNormalizer: Sendable {
             kCGImageSourceShouldCache: true
         ]
 
-        guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, imageOptions as CFDictionary) else {
-            throw ContinuoError.imageDecodeFailed(source.filename ?? source.localURL.lastPathComponent)
-        }
-
         let orientationValue = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value ?? 1
         let orientation = CGImagePropertyOrientation(rawValue: orientationValue) ?? .up
-        guard let fullResolutionImage = makeOrientedImage(from: decodedImage, orientation: orientation),
-              let matchingImage = makeNormalizedColorImage(from: fullResolutionImage) else {
-            throw ContinuoError.imageDecodeFailed(source.filename ?? source.localURL.lastPathComponent)
+        let normalizedImage: CGImage
+
+        // Prefer the platform decoder for every source, not only metadata
+        // that advertises a depth above 8 bits. HEIF metadata can omit or
+        // misreport the component depth, while the direct Image I/O path may
+        // still request the incompatible BGRx8 decode block for a 10-bpc
+        // image. UIImageReader/NSImage converts into a stable 8-bit
+        // standard-range raster without changing the source dimensions.
+        if let platformImage = makePlatformRasterImage(
+            from: source.localURL,
+            fallbackSize: originalSize,
+            requiresNonZeroContent: false
+        ) {
+            normalizedImage = platformImage
+        } else {
+            guard let decodedImage = CGImageSourceCreateImageAtIndex(imageSource, 0, imageOptions as CFDictionary) else {
+                throw ContinuoError.imageDecodeFailed(source.filename ?? source.localURL.lastPathComponent)
+            }
+            guard let renderedImage = makeNormalizedColorImage(
+                from: decodedImage,
+                sourceURL: source.localURL,
+                orientation: orientation
+            ) else {
+                throw ContinuoError.imageDecodeFailed(source.filename ?? source.localURL.lastPathComponent)
+            }
+            normalizedImage = renderedImage
         }
 
-        let workingSize = PixelSize(width: fullResolutionImage.width, height: fullResolutionImage.height)
-        let matching = makeMatchingRepresentation(from: matchingImage)
+        let workingSize = PixelSize(width: normalizedImage.width, height: normalizedImage.height)
+        let matching = makeMatchingRepresentation(from: normalizedImage)
         var normalizedSource = source
         normalizedSource.pixelSize = originalSize.width > 0 && originalSize.height > 0 ? originalSize : workingSize
         normalizedSource.orientation = .up
 
         return NormalizedImage(
             source: normalizedSource,
-            image: fullResolutionImage,
+            image: normalizedImage,
             matchingRepresentation: matching,
             originalPixelSize: originalSize.width > 0 && originalSize.height > 0 ? originalSize : workingSize,
             workingPixelSize: workingSize
         )
     }
 
-    private func makeNormalizedColorImage(from image: CGImage) -> CGImage? {
+    private func makeNormalizedColorImage(
+        from image: CGImage,
+        sourceURL: URL,
+        orientation: CGImagePropertyOrientation
+    ) -> CGImage? {
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        let width = image.width
-        let height = image.height
+        let byteOrder = image.bitmapInfo.rawValue & CGBitmapInfo.byteOrderMask.rawValue
+        let compatibleAlpha = image.alphaInfo == .premultipliedLast || image.alphaInfo == .last
+        if orientation == .up,
+           image.colorSpace?.name == colorSpace.name,
+           image.bitsPerComponent == 8,
+           image.bitsPerPixel == 32,
+           image.bytesPerRow >= image.width * 4,
+           compatibleAlpha,
+           byteOrder == 0 {
+            return image
+        }
+
+        // HEIF images from recent Apple devices may decode as 10-bit HEVC
+        // (`bitsPerComponent == 10`, often with a Display-P3 color space).
+        // A direct CGImage -> CGContext draw can produce a zero-filled
+        // bitmap for that representation. Prefer the platform image decoder
+        // for this conversion, preserving the source pixel dimensions while
+        // producing the stable 8-bit RGBA raster expected by the compositor.
+        if let platformImage = makePlatformRasterImage(
+            from: sourceURL,
+            fallbackSize: PixelSize(width: image.width, height: image.height),
+            requiresNonZeroContent: image.bitsPerComponent > 8
+        ) {
+            return platformImage
+        }
+
+        let fallbackImage: CGImage
+        if orientation == .up {
+            fallbackImage = image
+        } else {
+            fallbackImage = makeOrientedImage(from: image, orientation: orientation) ?? image
+        }
+        let width = fallbackImage.width
+        let height = fallbackImage.height
         let bytesPerRow = width * 4
         guard let context = CGContext(
             data: nil,
@@ -200,8 +338,110 @@ public struct ImageNormalizer: Sendable {
         }
 
         context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return context.makeImage()
+        context.draw(fallbackImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let rendered = context.makeImage() else { return nil }
+
+        // Do not allow a decoder failure to masquerade as an all-black
+        // screenshot and produce a false perfect registration.
+        if fallbackImage.bitsPerComponent > 8, hasNonZeroPixel(in: rendered) == false {
+            return nil
+        }
+        return rendered
+    }
+
+    private func makePlatformRasterImage(
+        from url: URL,
+        fallbackSize: PixelSize,
+        requiresNonZeroContent: Bool
+    ) -> CGImage? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+
+        #if canImport(UIKit)
+        var configuration = UIImageReader.Configuration()
+        configuration.prefersHighDynamicRange = false
+        configuration.preparesImagesForDisplay = true
+        configuration.preferredThumbnailSize = .zero
+        configuration.pixelsPerInch = 0
+        let reader = UIImageReader(configuration: configuration)
+        if let image = reader.image(data: data) {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = image.scale
+            format.opaque = false
+            format.preferredRange = .standard
+            let renderer = UIGraphicsImageRenderer(size: image.size, format: format)
+            let rendered = renderer.image { _ in
+                image.draw(in: CGRect(origin: .zero, size: image.size))
+            }
+            if let cgImage = rendered.cgImage,
+               cgImage.width > 0,
+               cgImage.height > 0,
+               !requiresNonZeroContent || hasNonZeroPixel(in: cgImage) {
+                return cgImage
+            }
+        }
+        #endif
+
+        #if canImport(AppKit)
+        if let image = NSImage(data: data) {
+            let width = max(1, fallbackSize.width)
+            let height = max(1, fallbackSize.height)
+            guard let bitmap = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: width,
+                pixelsHigh: height,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bitmapFormat: [],
+                bytesPerRow: width * 4,
+                bitsPerPixel: 32
+            ),
+            let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else {
+                return nil
+            }
+
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = graphics
+            image.draw(
+                in: CGRect(x: 0, y: 0, width: width, height: height),
+                from: .zero,
+                operation: .copy,
+                fraction: 1
+            )
+            graphics.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+
+            if let cgImage = bitmap.cgImage,
+               cgImage.width > 0,
+               cgImage.height > 0,
+               hasNonZeroPixel(in: cgImage) {
+                return cgImage
+            }
+        }
+        #endif
+
+        return nil
+    }
+
+    private func hasNonZeroPixel(in image: CGImage) -> Bool {
+        guard let data = image.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data) else {
+            return false
+        }
+
+        let sampleCount = min(256, image.width * image.height)
+        guard sampleCount > 0 else { return false }
+        let stride = max(1, (image.width * image.height) / sampleCount)
+        for sample in 0..<sampleCount {
+            let pixelIndex = min(image.width * image.height - 1, sample * stride)
+            let offset = (pixelIndex / image.width) * image.bytesPerRow + (pixelIndex % image.width) * 4
+            if bytes[offset] != 0 || bytes[offset + 1] != 0 || bytes[offset + 2] != 0 {
+                return true
+            }
+        }
+        return false
     }
 
     private func makeOrientedImage(

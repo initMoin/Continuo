@@ -22,11 +22,6 @@ enum PhotosImageExportError: LocalizedError, Sendable {
 
 struct PhotosImageExporter: Sendable {
     func save(_ image: CGImage) async throws {
-        let status = await requestAddPermissionIfNeeded()
-        guard status == .authorized || status == .limited else {
-            throw PhotosImageExportError.permissionDenied
-        }
-
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("Continuo-Stitched-\(UUID().uuidString)")
             .appendingPathExtension("png")
@@ -45,12 +40,28 @@ struct PhotosImageExporter: Sendable {
             throw PhotosImageExportError.encodingFailed
         }
 
+        try await save(fileURL: url, shouldMoveFile: false)
+    }
+
+    func save(fileURL: URL) async throws {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw PhotosImageExportError.saveFailed("The full-resolution history image is no longer available.")
+        }
+        try await save(fileURL: fileURL, shouldMoveFile: true)
+    }
+
+    private func save(fileURL: URL, shouldMoveFile: Bool) async throws {
+        let status = await requestAddPermissionIfNeeded()
+        guard status == .authorized || status == .limited else {
+            throw PhotosImageExportError.permissionDenied
+        }
+
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             PHPhotoLibrary.shared().performChanges {
                 let request = PHAssetCreationRequest.forAsset()
                 let options = PHAssetResourceCreationOptions()
-                options.shouldMoveFile = false
-                request.addResource(with: .photo, fileURL: url, options: options)
+                options.shouldMoveFile = shouldMoveFile
+                request.addResource(with: .photo, fileURL: fileURL, options: options)
             } completionHandler: { success, error in
                 if let error {
                     continuation.resume(throwing: PhotosImageExportError.saveFailed(error.localizedDescription))

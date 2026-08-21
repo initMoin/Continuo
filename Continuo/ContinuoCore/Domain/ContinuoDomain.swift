@@ -199,7 +199,27 @@ public struct JoinDiagnostics: Codable, Equatable, Sendable {
     public var backend: RegistrationBackend
     public var ambiguousCandidates: Bool
     public var candidateCount: Int
+    /// Monotonic wall-clock duration for this pairwise registration.
+    /// This is diagnostic only and is not used to make acceptance decisions.
+    public var elapsedMilliseconds: Double
     public var failureReason: JoinFailureReason?
+
+    private enum CodingKeys: String, CodingKey {
+        case code
+        case message
+        case recoverySuggestion
+        case similarityScore
+        case overlapSize
+        case overlapPercentage
+        case translation
+        case crossAxisDrift
+        case residualError
+        case backend
+        case ambiguousCandidates
+        case candidateCount
+        case elapsedMilliseconds
+        case failureReason
+    }
 
     public init(
         code: String,
@@ -214,6 +234,7 @@ public struct JoinDiagnostics: Codable, Equatable, Sendable {
         backend: RegistrationBackend,
         ambiguousCandidates: Bool,
         candidateCount: Int,
+        elapsedMilliseconds: Double = 0,
         failureReason: JoinFailureReason? = nil
     ) {
         self.code = code
@@ -228,7 +249,26 @@ public struct JoinDiagnostics: Codable, Equatable, Sendable {
         self.backend = backend
         self.ambiguousCandidates = ambiguousCandidates
         self.candidateCount = candidateCount
+        self.elapsedMilliseconds = elapsedMilliseconds
         self.failureReason = failureReason
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.code = try container.decode(String.self, forKey: .code)
+        self.message = try container.decode(String.self, forKey: .message)
+        self.recoverySuggestion = try container.decode(String.self, forKey: .recoverySuggestion)
+        self.similarityScore = try container.decode(Double.self, forKey: .similarityScore)
+        self.overlapSize = try container.decode(PixelSize.self, forKey: .overlapSize)
+        self.overlapPercentage = try container.decode(Double.self, forKey: .overlapPercentage)
+        self.translation = try container.decode(Point2D.self, forKey: .translation)
+        self.crossAxisDrift = try container.decode(Double.self, forKey: .crossAxisDrift)
+        self.residualError = try container.decode(Double.self, forKey: .residualError)
+        self.backend = try container.decode(RegistrationBackend.self, forKey: .backend)
+        self.ambiguousCandidates = try container.decode(Bool.self, forKey: .ambiguousCandidates)
+        self.candidateCount = try container.decode(Int.self, forKey: .candidateCount)
+        self.elapsedMilliseconds = try container.decodeIfPresent(Double.self, forKey: .elapsedMilliseconds) ?? 0
+        self.failureReason = try container.decodeIfPresent(JoinFailureReason.self, forKey: .failureReason)
     }
 }
 
@@ -397,9 +437,48 @@ public struct StitchPreview: @unchecked Sendable {
     }
 }
 
+/// A completed stitch retained after the active workflow is reset.
+///
+/// History keeps only a bounded thumbnail in memory. The full-resolution PNG,
+/// when available, remains in app-owned storage until the user explicitly
+/// exports it.
+public struct CompletedStitch: Identifiable, @unchecked Sendable {
+    public let id: UUID
+    public let thumbnail: CGImage
+    public var fullResolutionURL: URL?
+    public let pixelSize: PixelSize
+    public let savedAt: Date
+    public var sources: [SourceImage]
+    public var sourceImagesDeleted: Bool
+    public var sourceDeletionInProgress: Bool
+    public var sourceDeletionError: String?
+
+    public init(
+        id: UUID = UUID(),
+        thumbnail: CGImage,
+        fullResolutionURL: URL? = nil,
+        pixelSize: PixelSize,
+        savedAt: Date = Date(),
+        sources: [SourceImage] = [],
+        sourceImagesDeleted: Bool = false
+    ) {
+        self.id = id
+        self.thumbnail = thumbnail
+        self.fullResolutionURL = fullResolutionURL
+        self.pixelSize = pixelSize
+        self.savedAt = savedAt
+        self.sources = sources
+        self.sourceImagesDeleted = sourceImagesDeleted
+        self.sourceDeletionInProgress = false
+        self.sourceDeletionError = nil
+    }
+}
+
 public enum ContinuoError: Error, LocalizedError, Sendable {
     case noSources
     case needsAtLeastTwoSources
+    case photoLibraryPermissionDenied
+    case noMatchingScreenshotSequence
     case sourceUnavailable(String)
     case unsupportedImage(String)
     case unsupportedMedia(String)
@@ -418,6 +497,10 @@ public enum ContinuoError: Error, LocalizedError, Sendable {
             "Select at least two screenshots to begin."
         case .needsAtLeastTwoSources:
             "Continuo needs at least two screenshots for a join."
+        case .photoLibraryPermissionDenied:
+            "Continuo needs Photos access to find screenshots automatically."
+        case .noMatchingScreenshotSequence:
+            "Continuo could not find a nearby screenshot sequence that fits together."
         case let .sourceUnavailable(name):
             "The source \(name) is no longer available."
         case let .unsupportedImage(name):

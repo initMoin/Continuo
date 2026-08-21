@@ -1,4 +1,3 @@
-import Accelerate
 import CoreGraphics
 import Foundation
 import Vision
@@ -13,6 +12,30 @@ public struct RegistrationConfiguration: Sendable, Equatable {
     public var ambiguityDelta: Double
     public var ambiguityCoverageDelta: Double
     public var ambiguityMinimumVerticalSeparation: Double
+    /// Weak alternatives should not force review merely because they are
+    /// numerically close to the selected candidate.
+    public var ambiguityMinimumSimilarity: Double
+    public var ambiguityMinimumCoverageRatio: Double
+    /// Number of vertical offsets retained from the inexpensive row-profile
+    /// pass before the 2D correlation search begins.
+    public var maximumSeedOffsets: Int
+    /// Approximate number of horizontal drift samples used for each coarse
+    /// vertical seed. The exact count is bounded by the image dimensions.
+    public var coarseDriftSamples: Int
+    /// A high-overlap match can be useful even when local pixel agreement is
+    /// modest (for example, text rendered with slightly different antialiasing).
+    public var highCoverageAcceptanceRatio: Double
+    public var highCoverageSimilarityThreshold: Double
+    /// Avoids one-pixel near-duplicate matches winning over the actual scroll
+    /// displacement on repetitive interfaces. Scales with image height.
+    public var minimumVerticalTranslationRatio: Double
+    /// Fixed status/navigation/search chrome is excluded from matching only;
+    /// source pixels remain untouched for rendering.
+    public var matchingTopExclusionRatio: Double
+    public var matchingBottomExclusionRatio: Double
+    /// Prevents shared columns or fixed chrome from making unrelated images
+    /// look like a valid medium-confidence vertical match.
+    public var minimumStructuralSimilarityThreshold: Double
 
     public init(
         minimumOverlapRatio: Double = 0.18,
@@ -25,7 +48,17 @@ public struct RegistrationConfiguration: Sendable, Equatable {
         lowSimilarityThreshold: Double = 0.54,
         ambiguityDelta: Double = 0.006,
         ambiguityCoverageDelta: Double = 0.015,
-        ambiguityMinimumVerticalSeparation: Double = 36
+        ambiguityMinimumVerticalSeparation: Double = 36,
+        ambiguityMinimumSimilarity: Double = 0.58,
+        ambiguityMinimumCoverageRatio: Double = 0.30,
+        maximumSeedOffsets: Int = 10,
+        coarseDriftSamples: Int = 25,
+        highCoverageAcceptanceRatio: Double = 0.55,
+        highCoverageSimilarityThreshold: Double = 0.54,
+        minimumVerticalTranslationRatio: Double = 0.02,
+        matchingTopExclusionRatio: Double = 0.10,
+        matchingBottomExclusionRatio: Double = 0.04,
+        minimumStructuralSimilarityThreshold: Double = 0.52
     ) {
         self.minimumOverlapRatio = minimumOverlapRatio
         self.maximumCrossAxisDriftRatio = maximumCrossAxisDriftRatio
@@ -36,6 +69,16 @@ public struct RegistrationConfiguration: Sendable, Equatable {
         self.ambiguityDelta = ambiguityDelta
         self.ambiguityCoverageDelta = max(0, ambiguityCoverageDelta)
         self.ambiguityMinimumVerticalSeparation = max(1, ambiguityMinimumVerticalSeparation)
+        self.ambiguityMinimumSimilarity = min(1, max(0, ambiguityMinimumSimilarity))
+        self.ambiguityMinimumCoverageRatio = min(1, max(minimumOverlapRatio, ambiguityMinimumCoverageRatio))
+        self.maximumSeedOffsets = max(2, maximumSeedOffsets)
+        self.coarseDriftSamples = max(5, coarseDriftSamples)
+        self.highCoverageAcceptanceRatio = min(1, max(minimumOverlapRatio, highCoverageAcceptanceRatio))
+        self.highCoverageSimilarityThreshold = min(1, max(0, highCoverageSimilarityThreshold))
+        self.minimumVerticalTranslationRatio = min(0.25, max(0, minimumVerticalTranslationRatio))
+        self.matchingTopExclusionRatio = min(0.30, max(0, matchingTopExclusionRatio))
+        self.matchingBottomExclusionRatio = min(0.20, max(0, matchingBottomExclusionRatio))
+        self.minimumStructuralSimilarityThreshold = min(1, max(0, minimumStructuralSimilarityThreshold))
     }
 }
 
@@ -47,6 +90,7 @@ public struct PairwiseRegistrar: Sendable {
     }
 
     public func register(from: NormalizedImage, to: NormalizedImage, direction: StitchDirection = .vertical) async throws -> JoinResult {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
         try Task.checkCancellation()
 
         guard direction == .vertical else {
@@ -56,7 +100,8 @@ public struct PairwiseRegistrar: Sendable {
                 reason: .unsupportedDirection,
                 code: "registration.unsupported_direction",
                 message: "This foundation milestone registers vertical screenshot sequences only.",
-                suggestion: "Choose a vertical screenshot sequence and try again."
+                suggestion: "Choose a vertical screenshot sequence and try again.",
+                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
             )
         }
 
@@ -64,6 +109,8 @@ public struct PairwiseRegistrar: Sendable {
         try Task.checkCancellation()
 
         let allowedDrift = Double(max(from.matchingRepresentation.width, to.matchingRepresentation.width)) * configuration.maximumCrossAxisDriftRatio
+        let minimumVerticalTranslation = minimumVerticalTranslation(from: from, to: to)
+        var visionCandidateForComparison: Candidate?
         if let visionTranslation,
            let visionCandidate = evaluate(
                translation: visionTranslation,
@@ -71,22 +118,38 @@ public struct PairwiseRegistrar: Sendable {
                to: to.matchingRepresentation
            ),
            abs(visionCandidate.translation.x) <= allowedDrift,
-           visionCandidate.overlapPercentage >= configuration.minimumOverlapRatio,
-           visionCandidate.similarityScore >= configuration.mediumSimilarityThreshold {
-            return makeJoinResult(
-                from: from,
-                to: to,
-                candidate: visionCandidate,
-                backend: .vision,
-                ambiguous: false,
-                candidateCount: 1
-            )
+           visionCandidate.translation.y >= Double(minimumVerticalTranslation),
+           visionCandidate.overlapPercentage >= configuration.minimumOverlapRatio {
+            // Vision is a valuable fast path, but a medium score is not
+            // strong enough to bypass the independent fallback search. This
+            // avoids committing to an incorrect Vision alignment on
+            // repetitive or text-heavy screenshots.
+            if visionCandidate.similarityScore >= configuration.highSimilarityThreshold,
+               visionCandidate.overlapPercentage >= configuration.highCoverageAcceptanceRatio {
+                return makeJoinResult(
+                    from: from,
+                    to: to,
+                    candidate: visionCandidate,
+                    backend: .vision,
+                    ambiguous: false,
+                    candidateCount: 1,
+                    elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
+                )
+            }
+            visionCandidateForComparison = visionCandidate
         }
 
         let profile = try bestRowProfile(from: from.matchingRepresentation, to: to.matchingRepresentation)
-        let correlation = try bestCorrelation(from: from.matchingRepresentation, to: to.matchingRepresentation)
-
+        let correlation = try bestCorrelation(
+            from: from.matchingRepresentation,
+            to: to.matchingRepresentation,
+            seedOffsets: profile?.seedOffsets ?? [],
+            preferredOffset: visionTranslation.map { Int($0.y.rounded()) }
+        )
         var fallbackOptions: [(candidate: Candidate, backend: RegistrationBackend)] = []
+        if let visionCandidateForComparison {
+            fallbackOptions.append((visionCandidateForComparison, .vision))
+        }
         if let profile {
             fallbackOptions.append((profile.best, .rowProfile))
         }
@@ -101,7 +164,8 @@ public struct PairwiseRegistrar: Sendable {
                 reason: .noMatchFound,
                 code: "registration.no_match",
                 message: "Continuo could not find a usable overlap between these screenshots.",
-                suggestion: "Check that the screenshots are adjacent and share visible content."
+                suggestion: "Check that the screenshots are adjacent and share visible content.",
+                elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
             )
         }
 
@@ -128,13 +192,9 @@ public struct PairwiseRegistrar: Sendable {
             let scoreGap = selected.candidate.similarityScore - second.similarityScore
             let coverageGap = selected.candidate.overlapPercentage - second.overlapPercentage
             let verticalSeparation = abs(selected.candidate.translation.y - second.translation.y)
-            // An alternate candidate should only force review when the
-            // selected candidate is below the medium-confidence floor. A
-            // strong local match can legitimately have a nearby alternative
-            // in text-heavy or repetitive screenshots; rejecting those joins
-            // made otherwise obvious sequences fail unnecessarily.
-            let selectedIsBelowMediumConfidence = selected.candidate.similarityScore < configuration.mediumSimilarityThreshold
-            return selectedIsBelowMediumConfidence &&
+            let alternativeIsPlausible = second.similarityScore >= configuration.ambiguityMinimumSimilarity &&
+                second.overlapPercentage >= configuration.ambiguityMinimumCoverageRatio
+            return alternativeIsPlausible &&
                 scoreGap <= configuration.ambiguityDelta &&
                 coverageGap <= configuration.ambiguityCoverageDelta &&
                 verticalSeparation >= configuration.ambiguityMinimumVerticalSeparation
@@ -145,8 +205,14 @@ public struct PairwiseRegistrar: Sendable {
             candidate: selected.candidate,
             backend: selected.backend,
             ambiguous: isAmbiguous,
-            candidateCount: (profile?.candidateCount ?? 0) + (correlation?.candidateCount ?? 0)
+            candidateCount: (profile?.candidateCount ?? 0) + (correlation?.candidateCount ?? 0),
+            elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
         )
+    }
+
+    private func elapsedMilliseconds(since startedAt: UInt64) -> Double {
+        let elapsed = DispatchTime.now().uptimeNanoseconds &- startedAt
+        return Double(elapsed) / 1_000_000
     }
 
     private func makeJoinResult(
@@ -155,13 +221,18 @@ public struct PairwiseRegistrar: Sendable {
         candidate: Candidate,
         backend: RegistrationBackend,
         ambiguous: Bool,
-        candidateCount: Int
+        candidateCount: Int,
+        elapsedMilliseconds: Double
     ) -> JoinResult {
         let allowedDrift = Double(max(from.matchingRepresentation.width, to.matchingRepresentation.width)) * configuration.maximumCrossAxisDriftRatio
         // A weak match over only a sliver of the screenshots is too easy to
         // get from repeated rows or unrelated content. Larger overlaps use
         // the more accommodating similarity rules below.
         let thinOverlapWithWeakAgreement = candidate.overlapPercentage < 0.25 && candidate.similarityScore < 0.80
+        let highCoverageMatch = candidate.overlapPercentage >= configuration.highCoverageAcceptanceRatio &&
+            candidate.similarityScore >= configuration.highCoverageSimilarityThreshold
+        let weakVerticalStructure = candidate.similarityScore < configuration.highSimilarityThreshold &&
+            candidate.structuralScore < configuration.minimumStructuralSimilarityThreshold
 
         let failureReason: JoinFailureReason?
         if abs(candidate.translation.x) > allowedDrift {
@@ -170,7 +241,8 @@ public struct PairwiseRegistrar: Sendable {
             failureReason = .ambiguousMatch
         } else if candidate.overlapPercentage < configuration.minimumOverlapRatio {
             failureReason = .insufficientOverlap
-        } else if candidate.similarityScore < configuration.lowSimilarityThreshold || thinOverlapWithWeakAgreement {
+        } else if (candidate.similarityScore < configuration.lowSimilarityThreshold && !highCoverageMatch) ||
+                    thinOverlapWithWeakAgreement || weakVerticalStructure {
             failureReason = .lowVisualAgreement
         } else {
             failureReason = nil
@@ -181,7 +253,7 @@ public struct PairwiseRegistrar: Sendable {
             confidence = candidate.similarityScore >= configuration.lowSimilarityThreshold ? .low : .rejected
         } else if candidate.similarityScore >= configuration.highSimilarityThreshold {
             confidence = .high
-        } else if candidate.similarityScore >= configuration.mediumSimilarityThreshold {
+        } else if candidate.similarityScore >= configuration.mediumSimilarityThreshold || highCoverageMatch {
             confidence = .medium
         } else {
             confidence = .low
@@ -200,6 +272,7 @@ public struct PairwiseRegistrar: Sendable {
             backend: backend,
             ambiguousCandidates: ambiguous,
             candidateCount: candidateCount,
+            elapsedMilliseconds: elapsedMilliseconds,
             failureReason: failureReason
         )
 
@@ -237,6 +310,7 @@ public struct PairwiseRegistrar: Sendable {
         var overlapRect: Rect2D
         var similarityScore: Double
         var profileScore: Double = 0
+        var structuralScore: Double = 0
     }
 
     private struct CorrelationResult: Sendable {
@@ -255,6 +329,7 @@ public struct PairwiseRegistrar: Sendable {
         var best: Candidate
         var second: Candidate
         var candidateCount: Int
+        var seedOffsets: [Int]
     }
 
     private struct SignalAccumulator {
@@ -292,19 +367,70 @@ public struct PairwiseRegistrar: Sendable {
             let correlation = covariance / sqrt(lhsVariance * rhsVariance)
             return min(1, max(0, (correlation + 1) * 0.5))
         }
+
+        var variance: Double {
+            guard count > 0 else { return 0 }
+            let divisor = Double(count)
+            let average = lhsSum / divisor
+            return max(0, (lhsSquaredSum / divisor) - (average * average))
+        }
+
+        var rightVariance: Double {
+            guard count > 0 else { return 0 }
+            let divisor = Double(count)
+            let average = rhsSum / divisor
+            return max(0, (rhsSquaredSum / divisor) - (average * average))
+        }
+    }
+
+    private struct DoubleSignalAccumulator {
+        var count = 0
+        var lhsSum = 0.0
+        var rhsSum = 0.0
+        var lhsSquaredSum = 0.0
+        var rhsSquaredSum = 0.0
+        var crossProductSum = 0.0
+
+        mutating func append(_ lhs: Double, _ rhs: Double) {
+            count += 1
+            lhsSum += lhs
+            rhsSum += rhs
+            lhsSquaredSum += lhs * lhs
+            rhsSquaredSum += rhs * rhs
+            crossProductSum += lhs * rhs
+        }
+
+        var normalizedCorrelation: Double {
+            guard count > 0 else { return 0 }
+            let divisor = Double(count)
+            let lhsMean = lhsSum / divisor
+            let rhsMean = rhsSum / divisor
+            let lhsVariance = max(0, (lhsSquaredSum / divisor) - (lhsMean * lhsMean))
+            let rhsVariance = max(0, (rhsSquaredSum / divisor) - (rhsMean * rhsMean))
+
+            guard lhsVariance > 0.0000001, rhsVariance > 0.0000001 else {
+                return abs(lhsMean - rhsMean) < 0.0001 ? 1 : 0
+            }
+
+            let covariance = (crossProductSum / divisor) - (lhsMean * rhsMean)
+            let correlation = covariance / sqrt(lhsVariance * rhsVariance)
+            return min(1, max(0, (correlation + 1) * 0.5))
+        }
     }
 
     private func bestRowProfile(from: MatchingRepresentation, to: MatchingRepresentation) throws -> RowProfileResult? {
         let minimumOverlap = max(2, Int(Double(min(from.height, to.height)) * configuration.minimumOverlapRatio))
         let maximumOffset = min(from.height - minimumOverlap, to.height - minimumOverlap)
-        guard maximumOffset >= 1 else { return nil }
+        let minimumOffset = minimumVerticalTranslation(fromHeight: from.height, toHeight: to.height)
+        guard maximumOffset >= minimumOffset else { return nil }
 
         let fromProfile = makeRowProfile(from)
         let toProfile = makeRowProfile(to)
         let offsetStep = max(1, min(12, min(from.height, to.height) / 80))
         var scoredOffsets: [(offset: Int, score: Double)] = []
+        scoredOffsets.reserveCapacity(maximumOffset / offsetStep + 1)
 
-        for offset in sampledValues(from: 1, through: maximumOffset, by: offsetStep) {
+        for offset in sampledValues(from: minimumOffset, through: maximumOffset, by: offsetStep) {
             try Task.checkCancellation()
             let overlapHeight = min(from.height - offset, to.height)
             let profileScore = rowProfileAgreement(
@@ -329,6 +455,15 @@ public struct PairwiseRegistrar: Sendable {
         let secondOffset = scoredOffsets
             .filter { $0.offset != bestOffset.offset }
             .max { lhs, rhs in lhs.score < rhs.score }
+        let seedOffsets = scoredOffsets
+            .sorted { lhs, rhs in
+                if abs(lhs.score - rhs.score) > 0.001 {
+                    return lhs.score > rhs.score
+                }
+                return lhs.offset > rhs.offset
+            }
+            .prefix(configuration.maximumSeedOffsets)
+            .map(\.offset)
 
         guard var bestCandidate = evaluate(
             translation: Point2D(x: 0, y: Double(bestOffset.offset)),
@@ -339,7 +474,7 @@ public struct PairwiseRegistrar: Sendable {
         }
         bestCandidate.profileScore = bestOffset.score
         bestCandidate.similarityScore = min(1, max(0,
-            (bestCandidate.similarityScore * 0.45) + (bestOffset.score * 0.55)
+            (bestCandidate.similarityScore * 0.70) + (bestOffset.score * 0.30)
         ))
 
         guard let secondOffset,
@@ -351,23 +486,37 @@ public struct PairwiseRegistrar: Sendable {
             return RowProfileResult(
                 best: bestCandidate,
                 second: bestCandidate,
-                candidateCount: scoredOffsets.count
+                candidateCount: scoredOffsets.count,
+                seedOffsets: Array(seedOffsets)
             )
         }
         secondCandidate.profileScore = secondOffset.score
         secondCandidate.similarityScore = min(1, max(0,
-            (secondCandidate.similarityScore * 0.45) + (secondOffset.score * 0.55)
+            (secondCandidate.similarityScore * 0.70) + (secondOffset.score * 0.30)
         ))
 
         return RowProfileResult(
             best: bestCandidate,
             second: secondCandidate,
-            candidateCount: scoredOffsets.count
+            candidateCount: scoredOffsets.count,
+            seedOffsets: Array(seedOffsets)
         )
     }
 
     private func makeRowProfile(_ representation: MatchingRepresentation) -> [RowFeature] {
         guard representation.width > 0, representation.height > 0 else { return [] }
+
+        if representation.rowMeans.count == representation.height,
+           representation.rowVariances.count == representation.height,
+           representation.rowEdgeEnergy.count == representation.height {
+            return (0..<representation.height).map { index in
+                RowFeature(
+                    mean: Double(representation.rowMeans[index]),
+                    variance: Double(representation.rowVariances[index]),
+                    edgeEnergy: Double(representation.rowEdgeEnergy[index])
+                )
+            }
+        }
 
         var profile: [RowFeature] = []
         profile.reserveCapacity(representation.height)
@@ -404,107 +553,206 @@ public struct PairwiseRegistrar: Sendable {
             return 0
         }
 
-        var means: ([Double], [Double]) = ([], [])
-        var variances: ([Double], [Double]) = ([], [])
-        var edges: ([Double], [Double]) = ([], [])
-        means.0.reserveCapacity(overlapHeight)
-        means.1.reserveCapacity(overlapHeight)
-        variances.0.reserveCapacity(overlapHeight)
-        variances.1.reserveCapacity(overlapHeight)
-        edges.0.reserveCapacity(overlapHeight)
-        edges.1.reserveCapacity(overlapHeight)
+        var means = DoubleSignalAccumulator()
+        var variances = DoubleSignalAccumulator()
+        var edges = DoubleSignalAccumulator()
 
         for y in 0..<overlapHeight {
             let lhs = from[offset + y]
             let rhs = to[y]
-            means.0.append(lhs.mean)
-            means.1.append(rhs.mean)
-            variances.0.append(lhs.variance)
-            variances.1.append(rhs.variance)
-            edges.0.append(lhs.edgeEnergy)
-            edges.1.append(rhs.edgeEnergy)
+            means.append(lhs.mean, rhs.mean)
+            variances.append(lhs.variance, rhs.variance)
+            edges.append(lhs.edgeEnergy, rhs.edgeEnergy)
         }
 
         return min(1, max(0,
-            (rowCorrelation(means.0, means.1) * 0.45) +
-            (rowCorrelation(variances.0, variances.1) * 0.25) +
-            (rowCorrelation(edges.0, edges.1) * 0.30)
+            (means.normalizedCorrelation * 0.45) +
+            (variances.normalizedCorrelation * 0.25) +
+            (edges.normalizedCorrelation * 0.30)
         ))
     }
 
-    private func rowCorrelation(_ lhs: [Double], _ rhs: [Double]) -> Double {
-        guard !lhs.isEmpty, lhs.count == rhs.count else { return 0 }
-        let count = Double(lhs.count)
-        let lhsMean = lhs.reduce(0, +) / count
-        let rhsMean = rhs.reduce(0, +) / count
-        var lhsEnergy = 0.0
-        var rhsEnergy = 0.0
-        var dot = 0.0
-        for (left, right) in zip(lhs, rhs) {
-            let centeredLeft = left - lhsMean
-            let centeredRight = right - rhsMean
-            lhsEnergy += centeredLeft * centeredLeft
-            rhsEnergy += centeredRight * centeredRight
-            dot += centeredLeft * centeredRight
-        }
-
-        guard lhsEnergy > 0.0000001, rhsEnergy > 0.0000001 else {
-            return zip(lhs, rhs).allSatisfy { abs($0 - $1) < 0.0001 } ? 1 : 0
-        }
-        return min(1, max(0, (dot / sqrt(lhsEnergy * rhsEnergy) + 1) * 0.5))
-    }
-
-    private func bestCorrelation(from: MatchingRepresentation, to: MatchingRepresentation) throws -> CorrelationResult? {
+    private func bestCorrelation(
+        from: MatchingRepresentation,
+        to: MatchingRepresentation,
+        seedOffsets: [Int],
+        preferredOffset: Int?
+    ) throws -> CorrelationResult? {
         let minimumOverlap = max(2, Int(Double(min(from.height, to.height)) * configuration.minimumOverlapRatio))
         let maximumOffset = min(from.height - minimumOverlap, to.height - minimumOverlap)
-        guard maximumOffset >= 1 else { return nil }
+        let minimumOffset = minimumVerticalTranslation(fromHeight: from.height, toHeight: to.height)
+        guard maximumOffset >= minimumOffset else { return nil }
 
         let maximumSearchDrift = Int(Double(min(from.width, to.width)) * configuration.maximumSearchDriftRatio)
         let coarseOffsetStep = max(1, min(12, min(from.height, to.height) / 80))
-        let coarseDriftStep = max(1, min(12, min(from.width, to.width) / 80))
+        let coarseDriftStep = max(
+            1,
+            Int(ceil(Double(max(1, maximumSearchDrift * 2)) / Double(max(1, configuration.coarseDriftSamples - 1))))
+        )
         let coarseSampleStep = max(4, max(max(from.width, from.height), max(to.width, to.height)) / 128)
-        var candidates: [Candidate] = []
+        var bestCandidate: Candidate?
+        var secondCandidate: Candidate?
+        var coarseCandidates: [Candidate] = []
+        var candidateCount = 0
 
-        for offset in sampledValues(from: 1, through: maximumOffset, by: coarseOffsetStep) {
+        var offsets = seedOffsets
+            .map { min(max(minimumOffset, $0), maximumOffset) }
+        if let preferredOffset {
+            offsets.append(min(max(minimumOffset, preferredOffset), maximumOffset))
+        }
+        // The profile is deliberately the main accelerator, but retain a few
+        // broad anchors so a strong match is still discoverable when a page
+        // has unusually repetitive row structure.
+        offsets.append(contentsOf: [
+            minimumOffset,
+            maximumOffset,
+            maximumOffset / 2,
+            maximumOffset / 4,
+            (maximumOffset * 3) / 4,
+            maximumOffset / 6,
+            (maximumOffset * 5) / 6
+        ])
+        if offsets.isEmpty {
+            offsets = sampledValues(from: minimumOffset, through: maximumOffset, by: coarseOffsetStep)
+        }
+        offsets = Array(Set(offsets)).sorted()
+
+        let coarseDrifts = sampledValues(
+            from: -maximumSearchDrift,
+            through: maximumSearchDrift,
+            by: coarseDriftStep
+        )
+
+        for offset in offsets {
             try Task.checkCancellation()
-            for drift in sampledValues(from: -maximumSearchDrift, through: maximumSearchDrift, by: coarseDriftStep) {
+            for drift in coarseDrifts {
                 if let candidate = evaluate(
                     translation: Point2D(x: Double(drift), y: Double(offset)),
                     from: from,
                     to: to,
                     sampleStepOverride: coarseSampleStep
                 ) {
-                    candidates.append(candidate)
+                    candidateCount += 1
+                    coarseCandidates.append(candidate)
+                    updateTopCandidates(candidate, best: &bestCandidate, second: &secondCandidate)
                 }
             }
         }
 
-        guard let coarseBest = preferredCandidate(from: candidates) else { return nil }
-        let coarseBestOffset = Int(coarseBest.translation.y.rounded())
-        let coarseBestDrift = Int(coarseBest.translation.x.rounded())
-        let fineOffsetStart = max(1, coarseBestOffset - coarseOffsetStep)
-        let fineOffsetEnd = min(maximumOffset, coarseBestOffset + coarseOffsetStep)
-        let fineDriftStart = max(-maximumSearchDrift, coarseBestDrift - coarseDriftStep)
-        let fineDriftEnd = min(maximumSearchDrift, coarseBestDrift + coarseDriftStep)
-
-        for offset in fineOffsetStart...fineOffsetEnd {
-            try Task.checkCancellation()
-            for drift in fineDriftStart...fineDriftEnd {
+        // Row profiles are intentionally inexpensive, but repeated list rows
+        // and fixed chrome can make their top seeds cluster around the wrong
+        // neighborhood. Scan the full vertical range at zero drift with the
+        // coarse pixel step as a bounded second chance. This keeps the search
+        // practical while guaranteeing that a large, straight scroll is not
+        // missed merely because its row-profile peak was weak.
+        if min(from.height, to.height) >= 384 {
+            for offset in sampledValues(from: minimumOffset, through: maximumOffset, by: coarseOffsetStep) {
+                try Task.checkCancellation()
                 if let candidate = evaluate(
-                    translation: Point2D(x: Double(drift), y: Double(offset)),
+                    translation: Point2D(x: 0, y: Double(offset)),
                     from: from,
-                    to: to
+                    to: to,
+                    sampleStepOverride: coarseSampleStep
                 ) {
-                    candidates.append(candidate)
+                    candidateCount += 1
+                    coarseCandidates.append(candidate)
+                    updateTopCandidates(candidate, best: &bestCandidate, second: &secondCandidate)
                 }
             }
         }
 
-        guard let best = preferredCandidate(from: candidates) else { return nil }
-        let second = candidates
-            .filter { $0.translation != best.translation }
-            .max(by: { $0.similarityScore < $1.similarityScore })
-        return CorrelationResult(best: best, second: second, candidateCount: candidates.count)
+        guard bestCandidate != nil else { return nil }
+        let fineOffsetRadius = max(coarseOffsetStep, coarseOffsetStep * 4)
+        let fineDriftRadius = from.width >= 512 ? 2 : 1
+        let refinementLimit = min(from.height, to.height) >= 1_200 ? 6 : 3
+        var refinementCenters: [Int] = []
+        func appendCenter(_ value: Int) {
+            let clamped = min(max(minimumOffset, value), maximumOffset)
+            if !refinementCenters.contains(clamped) {
+                refinementCenters.append(clamped)
+            }
+        }
+
+        // Always reserve one refinement neighborhood for a broad anchor. The
+        // row-profile pass can be dominated by repeated list rows or fixed
+        // chrome, so allowing every slot to be consumed by those peaks can
+        // prevent the actual scroll displacement from ever reaching the
+        // full-resolution refinement pass.
+        let broadAnchor = (maximumOffset * 3) / 4
+        appendCenter(broadAnchor)
+        let topCandidateLimit = max(0, refinementLimit - 1)
+        for candidate in coarseCandidates.sorted(by: { isPreferred($0, over: $1) }).prefix(topCandidateLimit) {
+            appendCenter(Int(candidate.translation.y.rounded()))
+        }
+        let broadAnchors = [
+            broadAnchor,
+            (maximumOffset * 5) / 6,
+            maximumOffset / 2,
+            maximumOffset / 4,
+            minimumOffset,
+            maximumOffset
+        ]
+        for anchor in broadAnchors where refinementCenters.count < refinementLimit {
+            appendCenter(anchor)
+        }
+        for center in refinementCenters {
+            let fineOffsetStart = max(minimumOffset, center - fineOffsetRadius)
+            let fineOffsetEnd = min(maximumOffset, center + fineOffsetRadius)
+            // Broad anchors do not necessarily have a coarse candidate at
+            // the same vertical offset. In that case, using the global
+            // coarse-best drift can silently clamp the refinement to the
+            // horizontal search boundary and skip the actual zero-drift
+            // match. Start those neighborhoods at zero drift; nearby coarse
+            // candidates still provide a better local drift when available.
+            let centerDrift = Int(
+                (coarseCandidates
+                    .filter { Int($0.translation.y.rounded()) == center }
+                    .min { abs($0.translation.x) < abs($1.translation.x) }?
+                    .translation.x ?? 0
+                ).rounded()
+            )
+            let fineDriftStart = max(-maximumSearchDrift, centerDrift - fineDriftRadius)
+            let fineDriftEnd = min(maximumSearchDrift, centerDrift + fineDriftRadius)
+
+            for offset in fineOffsetStart...fineOffsetEnd {
+                try Task.checkCancellation()
+                for drift in fineDriftStart...fineDriftEnd {
+                    if let candidate = evaluate(
+                        translation: Point2D(x: Double(drift), y: Double(offset)),
+                        from: from,
+                        to: to
+                    ) {
+                        candidateCount += 1
+                        updateTopCandidates(candidate, best: &bestCandidate, second: &secondCandidate)
+                    }
+                }
+            }
+        }
+
+        guard let best = bestCandidate else { return nil }
+
+        // One final horizontal refinement is cheap and prevents a coarse
+        // drift step from leaving a visibly slanted or cropped result.
+        let refinedOffset = Int(best.translation.y.rounded())
+        let refinedDrift = Int(best.translation.x.rounded())
+        for drift in max(-maximumSearchDrift, refinedDrift - coarseDriftStep)...min(maximumSearchDrift, refinedDrift + coarseDriftStep) {
+            try Task.checkCancellation()
+            if let candidate = evaluate(
+                translation: Point2D(x: Double(drift), y: Double(refinedOffset)),
+                from: from,
+                to: to
+            ) {
+                candidateCount += 1
+                updateTopCandidates(candidate, best: &bestCandidate, second: &secondCandidate)
+            }
+        }
+
+        guard let finalBest = bestCandidate else { return nil }
+        return CorrelationResult(
+            best: finalBest,
+            second: secondCandidate,
+            candidateCount: candidateCount
+        )
     }
 
     private func isPreferred(_ candidate: Candidate, over other: Candidate) -> Bool {
@@ -533,18 +781,43 @@ public struct PairwiseRegistrar: Sendable {
         return scoreGap > 0
     }
 
-    private func preferredCandidate(from candidates: [Candidate]) -> Candidate? {
-        var preferred: Candidate?
-        for candidate in candidates {
-            guard let current = preferred else {
-                preferred = candidate
-                continue
+    private func updateTopCandidates(
+        _ candidate: Candidate,
+        best: inout Candidate?,
+        second: inout Candidate?
+    ) {
+        guard let currentBest = best else {
+            best = candidate
+            return
+        }
+
+        if candidate.translation == currentBest.translation {
+            if isPreferred(candidate, over: currentBest) {
+                best = candidate
             }
-            if isPreferred(candidate, over: current) {
-                preferred = candidate
+            return
+        }
+
+        if isPreferred(candidate, over: currentBest) {
+            second = currentBest
+            best = candidate
+            return
+        }
+
+        if let currentSecond = second,
+           candidate.translation == currentSecond.translation {
+            if isPreferred(candidate, over: currentSecond) {
+                second = candidate
+            }
+            return
+        }
+
+        if let currentSecond = second {
+            guard isPreferred(candidate, over: currentSecond) else {
+                return
             }
         }
-        return preferred
+        second = candidate
     }
 
     private func sampledValues(from lowerBound: Int, through upperBound: Int, by step: Int) -> [Int] {
@@ -556,6 +829,21 @@ public struct PairwiseRegistrar: Sendable {
         return values
     }
 
+    private func minimumVerticalTranslation(from: NormalizedImage, to: NormalizedImage) -> Int {
+        minimumVerticalTranslation(
+            fromHeight: from.matchingRepresentation.height,
+            toHeight: to.matchingRepresentation.height
+        )
+    }
+
+    private func minimumVerticalTranslation(fromHeight: Int, toHeight: Int) -> Int {
+        let shorterHeight = max(1, min(fromHeight, toHeight))
+        return max(
+            1,
+            Int((Double(shorterHeight) * configuration.minimumVerticalTranslationRatio).rounded(.up))
+        )
+    }
+
     private func evaluate(
         translation: Point2D,
         from: MatchingRepresentation,
@@ -564,7 +852,8 @@ public struct PairwiseRegistrar: Sendable {
     ) -> Candidate? {
         let offset = Int(translation.y.rounded())
         let drift = Int(translation.x.rounded())
-        guard offset >= 1 else { return nil }
+        let minimumOffset = minimumVerticalTranslation(fromHeight: from.height, toHeight: to.height)
+        guard offset >= minimumOffset else { return nil }
 
         let fromStartX = max(0, drift)
         let toStartX = max(0, -drift)
@@ -572,36 +861,59 @@ public struct PairwiseRegistrar: Sendable {
         let overlapHeight = min(from.height - offset, to.height)
         guard overlapWidth >= 2, overlapHeight >= 2 else { return nil }
 
-        let sampleStep = sampleStepOverride ?? max(1, max(overlapWidth, overlapHeight) / 256)
-        var lhs = [Float]()
-        var rhs = [Float]()
-        let estimatedSamplesPerRow = max(1, (overlapWidth + sampleStep - 1) / sampleStep)
-        let estimatedSampleRows = max(1, (overlapHeight + sampleStep - 1) / sampleStep)
-        lhs.reserveCapacity(estimatedSamplesPerRow * estimatedSampleRows)
-        rhs.reserveCapacity(lhs.capacity)
+        let topInset = min(
+            overlapHeight / 4,
+            Int((Double(min(from.height, to.height)) * configuration.matchingTopExclusionRatio).rounded())
+        )
+        let bottomInset = min(
+            max(0, overlapHeight - topInset - 2),
+            Int((Double(min(from.height, to.height)) * configuration.matchingBottomExclusionRatio).rounded())
+        )
+        let scoreStartY = topInset
+        let scoreHeight = overlapHeight - topInset - bottomInset
+        guard scoreHeight >= 2 else { return nil }
 
-        let tileCount = min(6, max(2, overlapHeight / max(16, sampleStep * 16)))
+        let sampleStep = sampleStepOverride ?? max(1, max(overlapWidth, overlapHeight) / 256)
+        let tileCount = min(6, max(2, scoreHeight / max(16, sampleStep * 16)))
         var luminanceTiles = [SignalAccumulator](repeating: SignalAccumulator(), count: tileCount)
         var edgeTiles = [SignalAccumulator](repeating: SignalAccumulator(), count: tileCount)
+        var verticalStructureTiles = [SignalAccumulator](repeating: SignalAccumulator(), count: tileCount)
+        var luminance = SignalAccumulator()
 
-        for y in stride(from: 0, to: overlapHeight, by: sampleStep) {
-            let tileIndex = min(tileCount - 1, (y * tileCount) / max(1, overlapHeight))
+        for y in stride(from: scoreStartY, to: scoreStartY + scoreHeight, by: sampleStep) {
+            let localY = y - scoreStartY
+            let tileIndex = min(tileCount - 1, (localY * tileCount) / max(1, scoreHeight))
             for x in stride(from: 0, to: overlapWidth, by: sampleStep) {
                 let left = from[fromStartX + x, offset + y]
                 let right = to[toStartX + x, y]
-                lhs.append(left)
-                rhs.append(right)
+                luminance.append(left, right)
                 luminanceTiles[tileIndex].append(left, right)
                 edgeTiles[tileIndex].append(
+                    from.edge(atX: fromStartX + x, y: offset + y),
+                    to.edge(atX: toStartX + x, y: y)
+                )
+                verticalStructureTiles[tileIndex].append(
                     from.verticalGradient(atX: fromStartX + x, y: offset + y),
                     to.verticalGradient(atX: toStartX + x, y: y)
                 )
             }
         }
 
-        guard !lhs.isEmpty else { return nil }
-        let luminanceScore = robustSignalScore(lhs, rhs)
+        guard luminance.count > 0 else { return nil }
+        let luminanceScore = robustSignalScore(
+            luminance,
+            from: from,
+            to: to,
+            fromStartX: fromStartX,
+            toStartX: toStartX,
+            offset: offset,
+            overlapWidth: overlapWidth,
+            startY: scoreStartY,
+            scoreHeight: scoreHeight,
+            sampleStep: sampleStep
+        )
         let edgeScore = median(edgeTiles.map(\.normalizedCorrelation))
+        let structuralScore = median(verticalStructureTiles.map(\.normalizedCorrelation))
         let tileConsensus = median(zip(luminanceTiles, edgeTiles).map { luminance, edge in
             (luminance.normalizedCorrelation * 0.8) + (edge.normalizedCorrelation * 0.2)
         })
@@ -618,49 +930,41 @@ public struct PairwiseRegistrar: Sendable {
             overlapHeight: overlapHeight,
             overlapPercentage: overlapPercentage,
             overlapRect: Rect2D(x: Double(fromStartX), y: Double(offset), width: Double(overlapWidth), height: Double(overlapHeight)),
-            similarityScore: similarity
+            similarityScore: similarity,
+            structuralScore: structuralScore
         )
     }
 
-    private func robustSignalScore(_ lhs: [Float], _ rhs: [Float]) -> Double {
-        guard !lhs.isEmpty, lhs.count == rhs.count else { return 0 }
+    private func robustSignalScore(
+        _ accumulator: SignalAccumulator,
+        from: MatchingRepresentation,
+        to: MatchingRepresentation,
+        fromStartX: Int,
+        toStartX: Int,
+        offset: Int,
+        overlapWidth: Int,
+        startY: Int,
+        scoreHeight: Int,
+        sampleStep: Int
+    ) -> Double {
+        guard accumulator.count > 0 else { return 0 }
 
-        var lhsSum: Float = 0
-        var rhsSum: Float = 0
-        vDSP_sve(lhs, 1, &lhsSum, vDSP_Length(lhs.count))
-        vDSP_sve(rhs, 1, &rhsSum, vDSP_Length(rhs.count))
-        let lhsMean = lhsSum / Float(lhs.count)
-        let rhsMean = rhsSum / Float(rhs.count)
-        var negativeLHSMean = -lhsMean
-        var negativeRHSMean = -rhsMean
-        var locallyCenteredLHS = [Float](repeating: 0, count: lhs.count)
-        var locallyCenteredRHS = [Float](repeating: 0, count: rhs.count)
-        vDSP_vsadd(lhs, 1, &negativeLHSMean, &locallyCenteredLHS, 1, vDSP_Length(lhs.count))
-        vDSP_vsadd(rhs, 1, &negativeRHSMean, &locallyCenteredRHS, 1, vDSP_Length(rhs.count))
-
-        var dot: Float = 0
-        var lhsEnergy: Float = 0
-        var rhsEnergy: Float = 0
-        vDSP_dotpr(locallyCenteredLHS, 1, locallyCenteredRHS, 1, &dot, vDSP_Length(lhs.count))
-        vDSP_svesq(locallyCenteredLHS, 1, &lhsEnergy, vDSP_Length(lhs.count))
-        vDSP_svesq(locallyCenteredRHS, 1, &rhsEnergy, vDSP_Length(rhs.count))
-
-        let correlation: Double
-        if lhsEnergy > 0.000001, rhsEnergy > 0.000001 {
-            correlation = (Double(dot) / sqrt(Double(lhsEnergy) * Double(rhsEnergy)) + 1.0) / 2.0
-        } else {
-            correlation = zip(locallyCenteredLHS, locallyCenteredRHS).allSatisfy { abs($0 - $1) < 0.0001 } ? 1.0 : 0.0
-        }
-
-        let lhsStandardDeviation = sqrt(Double(lhsEnergy) / Double(lhs.count))
-        let rhsStandardDeviation = sqrt(Double(rhsEnergy) / Double(rhs.count))
+        let correlation = accumulator.normalizedCorrelation
+        let lhsStandardDeviation = sqrt(accumulator.variance)
+        let rhsStandardDeviation = sqrt(accumulator.rightVariance)
         let normalizationScale = max(0.035, (lhsStandardDeviation + rhsStandardDeviation) * 0.5)
         let outlierLimit = normalizationScale * 1.75
         var cappedDifference: Double = 0
-        for (left, right) in zip(locallyCenteredLHS, locallyCenteredRHS) {
-            cappedDifference += min(Double(abs(left - right)), outlierLimit)
+        let lhsMean = accumulator.lhsSum / Double(accumulator.count)
+        let rhsMean = accumulator.rhsSum / Double(accumulator.count)
+        for y in stride(from: startY, to: startY + scoreHeight, by: sampleStep) {
+            for x in stride(from: 0, to: overlapWidth, by: sampleStep) {
+                let left = Double(from[fromStartX + x, offset + y]) - lhsMean
+                let right = Double(to[toStartX + x, y]) - rhsMean
+                cappedDifference += min(abs(left - right), outlierLimit)
+            }
         }
-        let normalizedDifference = cappedDifference / Double(lhs.count) / normalizationScale
+        let normalizedDifference = cappedDifference / Double(accumulator.count) / normalizationScale
         let robustDifferenceScore = max(0, 1.0 - min(1.0, normalizedDifference * 0.65))
         return min(1.0, max(0.0, (correlation * 0.88) + (robustDifferenceScore * 0.12)))
     }
@@ -681,7 +985,8 @@ public struct PairwiseRegistrar: Sendable {
         reason: JoinFailureReason,
         code: String,
         message: String,
-        suggestion: String
+        suggestion: String,
+        elapsedMilliseconds: Double = 0
     ) -> JoinResult {
         let diagnostics = JoinDiagnostics(
             code: code,
@@ -696,6 +1001,7 @@ public struct PairwiseRegistrar: Sendable {
             backend: .correlationFallback,
             ambiguousCandidates: false,
             candidateCount: 0,
+            elapsedMilliseconds: elapsedMilliseconds,
             failureReason: reason
         )
         return JoinResult(

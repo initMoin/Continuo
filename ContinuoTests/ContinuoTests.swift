@@ -22,6 +22,9 @@ final class ContinuoTests: XCTestCase {
         XCTAssertEqual(normalized.source.orientation, .up)
         XCTAssertEqual(normalized.matchingRepresentation.grayscale.count, normalized.workingPixelSize.area)
         XCTAssertEqual(normalized.matchingRepresentation.edgeMagnitude.count, normalized.workingPixelSize.area)
+        XCTAssertEqual(normalized.matchingRepresentation.rowMeans.count, normalized.workingPixelSize.height)
+        XCTAssertEqual(normalized.matchingRepresentation.rowVariances.count, normalized.workingPixelSize.height)
+        XCTAssertEqual(normalized.matchingRepresentation.rowEdgeEnergy.count, normalized.workingPixelSize.height)
         XCTAssertGreaterThan(normalized.matchingRepresentation.edgeMagnitude.max() ?? 0, 0)
     }
 
@@ -42,6 +45,69 @@ final class ContinuoTests: XCTestCase {
         XCTAssertEqual(imported.map(\.sourceOrigin), [.files, .files])
         XCTAssertEqual(imported.map(\.originalSourceURL), [secondURL, firstURL])
         XCTAssertTrue(imported.allSatisfy { $0.localURL != $0.originalSourceURL })
+    }
+
+    func testAutomaticScreenshotSelectorPrefersLongestCompatibleChronologicalPath() {
+        let baseDate = Date(timeIntervalSince1970: 1_000)
+        let first = makeSequenceSource("first", date: baseDate)
+        let second = makeSequenceSource("second", date: baseDate.addingTimeInterval(4))
+        let unrelated = makeSequenceSource("unrelated", date: baseDate.addingTimeInterval(8))
+        let fourth = makeSequenceSource("fourth", date: baseDate.addingTimeInterval(12))
+        let fifth = makeSequenceSource("fifth", date: baseDate.addingTimeInterval(16))
+
+        let joins = [
+            makeAcceptedJoin(from: first.id, to: second.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60),
+            makeAcceptedJoin(from: second.id, to: unrelated.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60),
+            makeAcceptedJoin(from: unrelated.id, to: fourth.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60),
+            makeAcceptedJoin(from: fourth.id, to: fifth.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60)
+        ]
+
+        let selection = AutomaticScreenshotSequenceSelector().select(
+            sources: [fifth, unrelated, first, fourth, second],
+            joins: joins
+        )
+
+        XCTAssertEqual(selection?.sources.map(\.filename), ["first", "second", "unrelated", "fourth", "fifth"])
+        XCTAssertEqual(selection?.joinCount, 4)
+    }
+
+    func testAutomaticScreenshotSelectorDoesNotBridgeLargeCreationDateGaps() {
+        let baseDate = Date(timeIntervalSince1970: 2_000)
+        let first = makeSequenceSource("first", date: baseDate)
+        let second = makeSequenceSource("second", date: baseDate.addingTimeInterval(4))
+        let distant = makeSequenceSource("distant", date: baseDate.addingTimeInterval(900))
+
+        let joins = [
+            makeAcceptedJoin(from: first.id, to: second.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60),
+            makeAcceptedJoin(from: second.id, to: distant.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60)
+        ]
+
+        let selection = AutomaticScreenshotSequenceSelector().select(
+            sources: [first, second, distant],
+            joins: joins
+        )
+
+        XCTAssertEqual(selection?.sources.map(\.filename), ["first", "second"])
+        XCTAssertEqual(selection?.joinCount, 1)
+    }
+
+    func testAutomaticScreenshotSelectorSupportsReverseCaptureDirection() {
+        let baseDate = Date(timeIntervalSince1970: 3_000)
+        let bottom = makeSequenceSource("bottom", date: baseDate)
+        let middle = makeSequenceSource("middle", date: baseDate.addingTimeInterval(4))
+        let top = makeSequenceSource("top", date: baseDate.addingTimeInterval(8))
+        let joins = [
+            makeAcceptedJoin(from: top.id, to: middle.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60),
+            makeAcceptedJoin(from: middle.id, to: bottom.id, translation: Point2D(x: 0, y: 40), overlapHeight: 60)
+        ]
+
+        let selection = AutomaticScreenshotSequenceSelector().select(
+            sources: [middle, top, bottom],
+            joins: joins
+        )
+
+        XCTAssertEqual(selection?.sources.map(\.filename), ["top", "middle", "bottom"])
+        XCTAssertEqual(selection?.joinCount, 2)
     }
 
     func testPixelRegionCropperPreservesExactPixelWindow() throws {
@@ -141,6 +207,36 @@ final class ContinuoTests: XCTestCase {
         XCTAssertGreaterThan(result.diagnostics.overlapPercentage, 0.4)
         XCTAssertNil(result.diagnostics.failureReason, "diagnostics=\(result.diagnostics)")
         XCTAssertGreaterThan(result.diagnostics.candidateCount, 0)
+        XCTAssertGreaterThan(result.diagnostics.elapsedMilliseconds, 0)
+    }
+
+    func testJoinDiagnosticsDecodesLegacyPayloadWithoutTiming() throws {
+        let diagnostics = JoinDiagnostics(
+            code: "registration.accepted",
+            message: "High-confidence vertical join.",
+            recoverySuggestion: "",
+            similarityScore: 0.95,
+            overlapSize: PixelSize(width: 16, height: 60),
+            overlapPercentage: 0.6,
+            translation: Point2D(x: 0, y: 40),
+            crossAxisDrift: 0,
+            residualError: 0.05,
+            backend: .correlationFallback,
+            ambiguousCandidates: false,
+            candidateCount: 10,
+            elapsedMilliseconds: 12.5
+        )
+        let encoded = try JSONEncoder().encode(diagnostics)
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        object.removeValue(forKey: "elapsedMilliseconds")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+
+        let decoded = try JSONDecoder().decode(JoinDiagnostics.self, from: legacyData)
+        XCTAssertEqual(decoded.elapsedMilliseconds, 0)
+        XCTAssertEqual(decoded.similarityScore, diagnostics.similarityScore)
+        XCTAssertEqual(decoded.translation, diagnostics.translation)
     }
 
     func testRegistrationEvaluatesComplementaryFallbackStrategies() async throws {
@@ -197,6 +293,53 @@ final class ContinuoTests: XCTestCase {
         XCTAssertTrue(result.confidence.isAccepted, "diagnostics=\(result.diagnostics)")
         XCTAssertLessThanOrEqual(abs(result.transform.ty - 40), 2, "diagnostics=\(result.diagnostics)")
         XCTAssertGreaterThan(result.diagnostics.overlapPercentage, 0.4, "diagnostics=\(result.diagnostics)")
+    }
+
+    func testRegistrationUsesBoundedSearchForLargerRepresentations() async throws {
+        let width = 128
+        let firstRows = detailedRows(start: 0, count: 512, width: width)
+        let secondRows = renderedVariant(detailedRows(start: 160, count: 512, width: width))
+        let firstImage = try XCTUnwrap(makeTestImage(values: firstRows))
+        let secondImage = try XCTUnwrap(makeTestImage(values: secondRows))
+        let first = makeNormalizedImage(id: UUID(), image: firstImage, values: firstRows)
+        let second = makeNormalizedImage(id: UUID(), image: secondImage, values: secondRows)
+
+        let configuration = RegistrationConfiguration(
+            maximumSeedOffsets: 6,
+            coarseDriftSamples: 13
+        )
+        let result = try await PairwiseRegistrar(configuration: configuration).register(from: first, to: second)
+
+        XCTAssertLessThan(
+            result.diagnostics.candidateCount,
+            900,
+            "The fallback search should stay bounded; diagnostics=\(result.diagnostics)"
+        )
+        XCTAssertLessThanOrEqual(
+            abs(result.transform.ty - 160),
+            12,
+            "The bounded search should retain the correct vertical neighborhood; diagnostics=\(result.diagnostics)"
+        )
+    }
+
+    func testRegistrationFindsLargeScrollWhenRowProfilePrefersRepeatedContent() async throws {
+        let width = 64
+        let firstRows = detailedRows(start: 0, count: 1_536, width: width)
+        let secondRows = renderedVariant(detailedRows(start: 960, count: 1_536, width: width))
+        let firstImage = try XCTUnwrap(makeTestImage(values: firstRows))
+        let secondImage = try XCTUnwrap(makeTestImage(values: secondRows))
+        let first = makeNormalizedImage(id: UUID(), image: firstImage, values: firstRows)
+        let second = makeNormalizedImage(id: UUID(), image: secondImage, values: secondRows)
+
+        let result = try await PairwiseRegistrar().register(from: first, to: second)
+
+        XCTAssertTrue(result.confidence.isAccepted, "diagnostics=\(result.diagnostics)")
+        XCTAssertLessThanOrEqual(
+            abs(result.transform.ty - 960),
+            12,
+            "The full-range fallback scan should recover a large vertical displacement; diagnostics=\(result.diagnostics)"
+        )
+        XCTAssertGreaterThan(result.diagnostics.candidateCount, 0)
     }
 
     func testLowAgreementProducesExplicitFailureDiagnostics() async throws {
@@ -642,6 +785,308 @@ final class ContinuoTests: XCTestCase {
         XCTAssertNotNil(viewModel.preview)
     }
 
+    @MainActor
+    func testResetArchivesSavedStitchAndClearsActiveWorkflow() async throws {
+        let historyRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-view-model-history-\(UUID().uuidString)", isDirectory: true)
+        let firstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-reset-first-\(UUID().uuidString).png")
+        let secondURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-reset-second-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: historyRootURL)
+            try? FileManager.default.removeItem(at: firstURL)
+            try? FileManager.default.removeItem(at: secondURL)
+        }
+
+        let firstRows = variedRows(start: 0, count: 100)
+        let secondRows = variedRows(start: 40, count: 100)
+        try writePNG(try XCTUnwrap(makeTestImage(width: 16, rows: firstRows)), to: firstURL)
+        try writePNG(try XCTUnwrap(makeTestImage(width: 16, rows: secondRows)), to: secondURL)
+
+        let viewModel = ContinuoViewModel(
+            historyImageStore: HistoryImageStore(directoryURL: historyRootURL)
+        )
+        viewModel.importFiles([firstURL, secondURL])
+        viewModel.stitch()
+
+        for _ in 0..<250 {
+            if viewModel.state == .ready || viewModel.state == .failed {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let preview = try XCTUnwrap(viewModel.preview)
+        viewModel.markSaveCompleted()
+        XCTAssertTrue(viewModel.isCurrentPreviewSaved)
+
+        await viewModel.resetActiveWorkflowAndWait()
+
+        XCTAssertTrue(viewModel.sources.isEmpty)
+        XCTAssertNil(viewModel.preview)
+        XCTAssertEqual(viewModel.state, .idle)
+        XCTAssertFalse(viewModel.isCurrentPreviewSaved)
+        XCTAssertEqual(viewModel.completedStitches.count, 1)
+        XCTAssertEqual(viewModel.completedStitches[0].pixelSize, preview.pixelSize)
+        XCTAssertEqual(viewModel.completedStitches[0].thumbnail.width, preview.image.width)
+        XCTAssertEqual(viewModel.completedStitches[0].thumbnail.height, preview.image.height)
+        let archivedURL = try XCTUnwrap(viewModel.completedStitches[0].fullResolutionURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archivedURL.path))
+        XCTAssertEqual(viewModel.completedStitches[0].sources.map(\.originalSourceURL), [firstURL, secondURL])
+        XCTAssertFalse(viewModel.completedStitches[0].sourceImagesDeleted)
+
+        viewModel.consumeHistoryAsset(id: viewModel.completedStitches[0].id)
+        XCTAssertNil(viewModel.completedStitches[0].fullResolutionURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: archivedURL.path))
+    }
+
+    func testHistoryImageStorePersistsFullResolutionAndBoundsThumbnail() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-store-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let image = try XCTUnwrap(makeTestImage(width: 12, rows: Array(repeating: 0.4, count: 2_400)))
+        let store = HistoryImageStore(directoryURL: rootURL)
+        let asset = try store.archive(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            id: UUID()
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        XCTAssertEqual(asset.pixelSize, PixelSize(width: image.width, height: image.height))
+        XCTAssertLessThanOrEqual(max(asset.thumbnail.width, asset.thumbnail.height), 1_600)
+        XCTAssertEqual(asset.fullResolutionURL.pathExtension, "png")
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].pixelSize, asset.pixelSize)
+        XCTAssertEqual(loaded[0].fullResolutionURL, asset.fullResolutionURL)
+        XCTAssertLessThanOrEqual(max(loaded[0].thumbnail.width, loaded[0].thumbnail.height), 1_600)
+
+        var consumedStitch = loaded[0]
+        store.remove(asset.fullResolutionURL)
+        consumedStitch.fullResolutionURL = nil
+        try store.update(consumedStitch)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        let reloaded = try store.load()
+        XCTAssertEqual(reloaded.count, 1)
+        XCTAssertNil(reloaded[0].fullResolutionURL)
+        XCTAssertEqual(reloaded[0].thumbnail.width, loaded[0].thumbnail.width)
+    }
+
+    @MainActor
+    func testResetDoesNotArchiveUnsavedStitch() async throws {
+        let historyRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-unsaved-history-\(UUID().uuidString)", isDirectory: true)
+        let firstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-unsaved-reset-first-\(UUID().uuidString).png")
+        let secondURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-unsaved-reset-second-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: historyRootURL)
+            try? FileManager.default.removeItem(at: firstURL)
+            try? FileManager.default.removeItem(at: secondURL)
+        }
+
+        try writePNG(
+            try XCTUnwrap(makeTestImage(width: 16, rows: variedRows(start: 0, count: 100))),
+            to: firstURL
+        )
+        try writePNG(
+            try XCTUnwrap(makeTestImage(width: 16, rows: variedRows(start: 40, count: 100))),
+            to: secondURL
+        )
+
+        let viewModel = ContinuoViewModel(
+            historyImageStore: HistoryImageStore(directoryURL: historyRootURL)
+        )
+        viewModel.importFiles([firstURL, secondURL])
+        viewModel.stitch()
+
+        for _ in 0..<250 {
+            if viewModel.state == .ready || viewModel.state == .failed {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        XCTAssertNotNil(viewModel.preview)
+        XCTAssertFalse(viewModel.isCurrentPreviewSaved)
+
+        await viewModel.resetActiveWorkflowAndWait()
+
+        XCTAssertTrue(viewModel.completedStitches.isEmpty)
+        XCTAssertTrue(viewModel.sources.isEmpty)
+        XCTAssertNil(viewModel.preview)
+    }
+
+    @MainActor
+    func testResetArchivesSourceDeletedStateForHistoryActions() async throws {
+        let image = try XCTUnwrap(makeTestImage(width: 2, rows: [0.2, 0.8]))
+        let historyRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-deleted-history-\(UUID().uuidString)", isDirectory: true)
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-deleted-state-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: historyRootURL)
+            try? FileManager.default.removeItem(at: sourceURL)
+        }
+
+        let source = SourceImage(
+            localURL: sourceURL,
+            sourceOrigin: .files,
+            originalSourceURL: sourceURL,
+            filename: sourceURL.lastPathComponent
+        )
+        let preview = StitchPreview(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            placements: [],
+            joins: []
+        )
+        let viewModel = ContinuoViewModel(
+            historyImageStore: HistoryImageStore(directoryURL: historyRootURL)
+        )
+        viewModel.sources = [source]
+        viewModel.preview = preview
+        viewModel.markSaveCompleted()
+        viewModel.sourceCleanupState = .deleted
+
+        await viewModel.resetActiveWorkflowAndWait()
+
+        XCTAssertEqual(viewModel.completedStitches.count, 1)
+        XCTAssertTrue(viewModel.completedStitches[0].sourceImagesDeleted)
+        XCTAssertEqual(viewModel.completedStitches[0].sources, [source])
+    }
+
+    @MainActor
+    func testHistorySourceDeletionOnlyDeletesTheRequestedStitchSources() async throws {
+        let firstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-delete-first-\(UUID().uuidString).png")
+        let secondURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-delete-second-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: firstURL)
+            try? FileManager.default.removeItem(at: secondURL)
+        }
+
+        let image = try XCTUnwrap(makeTestImage(width: 2, rows: [0.2, 0.8]))
+        try writePNG(image, to: firstURL)
+        try writePNG(image, to: secondURL)
+
+        let firstSource = SourceImage(
+            localURL: firstURL,
+            sourceOrigin: .files,
+            originalSourceURL: firstURL,
+            filename: firstURL.lastPathComponent
+        )
+        let secondSource = SourceImage(
+            localURL: secondURL,
+            sourceOrigin: .files,
+            originalSourceURL: secondURL,
+            filename: secondURL.lastPathComponent
+        )
+        let firstStitch = CompletedStitch(
+            thumbnail: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            sources: [firstSource]
+        )
+        let secondStitch = CompletedStitch(
+            thumbnail: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            sources: [secondSource]
+        )
+
+        let viewModel = ContinuoViewModel()
+        viewModel.completedStitches = [firstStitch, secondStitch]
+
+        await viewModel.deleteCompletedStitchSources(id: firstStitch.id)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondURL.path))
+        XCTAssertTrue(viewModel.completedStitches[0].sourceImagesDeleted)
+        XCTAssertFalse(viewModel.completedStitches[1].sourceImagesDeleted)
+        XCTAssertNil(viewModel.completedStitches[0].sourceDeletionError)
+        XCTAssertNil(viewModel.completedStitches[1].sourceDeletionError)
+    }
+
+    @MainActor
+    func testHistorySourceDeletionKeepsFailureOnTheRequestedStitch() async throws {
+        let validURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-delete-valid-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: validURL) }
+
+        let image = try XCTUnwrap(makeTestImage(width: 2, rows: [0.2, 0.8]))
+        try writePNG(image, to: validURL)
+
+        let validSource = SourceImage(
+            localURL: validURL,
+            sourceOrigin: .files,
+            originalSourceURL: validURL,
+            filename: validURL.lastPathComponent
+        )
+        let missingSource = SourceImage(
+            localURL: validURL,
+            sourceOrigin: .files,
+            originalSourceURL: validURL.appendingPathExtension("missing"),
+            filename: "missing.png"
+        )
+        let validStitch = CompletedStitch(
+            thumbnail: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            sources: [validSource]
+        )
+        let failingStitch = CompletedStitch(
+            thumbnail: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            sources: [missingSource]
+        )
+
+        let viewModel = ContinuoViewModel()
+        viewModel.completedStitches = [validStitch, failingStitch]
+
+        await viewModel.deleteCompletedStitchSources(id: failingStitch.id)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: validURL.path))
+        XCTAssertFalse(viewModel.completedStitches[0].sourceImagesDeleted)
+        XCTAssertFalse(viewModel.completedStitches[1].sourceImagesDeleted)
+        XCTAssertNotNil(viewModel.completedStitches[1].sourceDeletionError)
+        XCTAssertNil(viewModel.completedStitches[0].sourceDeletionError)
+    }
+
+    @MainActor
+    func testClearingSourcesRemovesOnlyContinuoWorkingCopy() throws {
+        let originalURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-cleanup-original-\(UUID().uuidString).png")
+        let workingCopyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-cleanup-working-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: originalURL)
+            try? FileManager.default.removeItem(at: workingCopyURL)
+        }
+
+        let image = try XCTUnwrap(makeTestImage(width: 2, rows: [0.2, 0.8]))
+        try writePNG(image, to: originalURL)
+        try FileManager.default.copyItem(at: originalURL, to: workingCopyURL)
+
+        let source = SourceImage(
+            localURL: workingCopyURL,
+            sourceOrigin: .files,
+            originalSourceURL: originalURL,
+            filename: originalURL.lastPathComponent
+        )
+        let viewModel = ContinuoViewModel()
+        viewModel.sources = [source]
+
+        viewModel.clearSources()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workingCopyURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: originalURL.path))
+    }
+
     private func makeNormalizedImage(id: UUID, image: CGImage, rows: [Float], width: Int = 16) -> NormalizedImage {
         let values = rows.flatMap { row in
             (0..<width).map { column in
@@ -650,6 +1095,15 @@ final class ContinuoTests: XCTestCase {
             }
         }
         return makeNormalizedImage(id: id, image: image, values: values, width: width)
+    }
+
+    private func makeSequenceSource(_ filename: String, date: Date) -> SourceImage {
+        SourceImage(
+            localURL: URL(fileURLWithPath: "/tmp/\(filename).png"),
+            pixelSize: PixelSize(width: 430, height: 932),
+            captureDate: date,
+            filename: filename
+        )
     }
 
     private func makeNormalizedImage(id: UUID, image: CGImage, values: [[Float]]) -> NormalizedImage {

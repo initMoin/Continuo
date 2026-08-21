@@ -8,7 +8,8 @@ struct StitchedImageDocument: FileDocument {
     static let readableContentTypes: [UTType] = [.png]
     static let writableContentTypes: [UTType] = [.png]
 
-    private let data: Data
+    private let data: Data?
+    private let sourceURL: URL
 
     init(image: CGImage) throws {
         guard let destinationData = CFDataCreateMutable(nil, 0),
@@ -26,13 +27,26 @@ struct StitchedImageDocument: FileDocument {
             throw CocoaError(.fileWriteUnknown)
         }
         data = destinationData as Data
+        sourceURL = URL(fileURLWithPath: "")
+    }
+
+    init(fileURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        data = nil
+        sourceURL = fileURL
     }
 
     init(configuration: ReadConfiguration) throws {
         data = configuration.file.regularFileContents ?? Data()
+        sourceURL = URL(fileURLWithPath: "")
     }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: data)
+        if let data {
+            return FileWrapper(regularFileWithContents: data)
+        }
+        return try FileWrapper(url: sourceURL, options: .immediate)
     }
 }
