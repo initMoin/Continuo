@@ -616,6 +616,26 @@ struct ContentView: View {
         }
     }
 
+    private func screenshotDeviceShape(for size: CGSize) -> RoundedRectangle {
+        let shortEdge = max(1, min(size.width, size.height))
+        let cornerRadius = min(shortEdge / 2, max(10, shortEdge * 0.06))
+        return RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
+
+    private func framedScreenshot<Content: View>(
+        size: CGSize,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let deviceShape = screenshotDeviceShape(for: size)
+
+        return content()
+            .clipShape(deviceShape)
+            .overlay {
+                deviceShape
+                    .strokeBorder(Color.primary.opacity(0.30), lineWidth: 1)
+            }
+    }
+
     private func stitchedPreviewView(_ preview: StitchPreview) -> some View {
         let pixelWidth = max(CGFloat(1), CGFloat(preview.pixelSize.width))
         let pixelHeight = max(CGFloat(1), CGFloat(preview.pixelSize.height))
@@ -658,11 +678,13 @@ struct ContentView: View {
                     .offset(x: (displayWidth / 2) + 20)
                     .opacity(isMagicRevealing ? 0.8 : 0)
 
-                Image(preview.image, scale: 1, orientation: .up, label: Text("Stitched screenshot preview"))
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: displayWidth, height: displayHeight)
-                    .accessibilityLabel("Stitched result, \(preview.pixelSize.width) by \(preview.pixelSize.height) pixels")
+                framedScreenshot(size: CGSize(width: displayWidth, height: displayHeight)) {
+                    Image(preview.image, scale: 1, orientation: .up, label: Text("Stitched screenshot preview"))
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: displayWidth, height: displayHeight)
+                        .accessibilityLabel("Stitched result, \(preview.pixelSize.width) by \(preview.pixelSize.height) pixels")
+                }
             }
             .padding(.vertical, 8)
 
@@ -704,22 +726,28 @@ struct ContentView: View {
         let maximumDisplayWidth: CGFloat = horizontalSizeClass == .compact ? 350 : 900
         let sourceWidth = max(1, CGFloat(stitch.pixelSize.width))
         let sourceHeight = max(1, CGFloat(stitch.pixelSize.height))
+        let frameSize = CGSize(
+            width: maximumDisplayWidth,
+            height: maximumDisplayWidth * sourceHeight / sourceWidth
+        )
 
         return VStack(alignment: .center, spacing: 10) {
             ZStack(alignment: .bottomTrailing) {
-                Image(
-                    stitch.thumbnail,
-                    scale: 1,
-                    orientation: .up,
-                    label: Text("Saved stitched screenshot")
-                )
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(sourceWidth / sourceHeight, contentMode: .fit)
-                .frame(maxWidth: maximumDisplayWidth)
-                .accessibilityLabel(
-                    "Saved stitched result, \(stitch.pixelSize.width) by \(stitch.pixelSize.height) pixels"
-                )
+                framedScreenshot(size: frameSize) {
+                    Image(
+                        stitch.thumbnail,
+                        scale: 1,
+                        orientation: .up,
+                        label: Text("Saved stitched screenshot")
+                    )
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(sourceWidth / sourceHeight, contentMode: .fit)
+                    .frame(maxWidth: maximumDisplayWidth)
+                    .accessibilityLabel(
+                        "Saved stitched result, \(stitch.pixelSize.width) by \(stitch.pixelSize.height) pixels"
+                    )
+                }
 
                 if stitch.fullResolutionURL != nil || (!stitch.sourceImagesDeleted && !stitch.sources.isEmpty) {
                     Button {
@@ -728,10 +756,15 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "square.and.arrow.up")
                             .font(.system(size: 19, weight: .semibold))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(.tint)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Color(white: 0.72))
                             .frame(width: 44, height: 44)
-                            .background(.thinMaterial, in: Circle())
+                            .background(Color(white: 0.08).opacity(0.96), in: Circle())
+                            .overlay {
+                                Circle()
+                                    .stroke(.white.opacity(0.12), lineWidth: 1)
+                            }
+                            .shadow(color: .black.opacity(0.22), radius: 6, y: 2)
                     }
                     .buttonStyle(.plain)
                     .padding(12)

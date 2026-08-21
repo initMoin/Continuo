@@ -65,20 +65,21 @@ final class ContinuoViewModel {
 
     func importPhotos(_ results: [PHPickerResult]) {
         logger.info("Received photo selection with \(results.count) item(s) and Photos asset identifiers.")
-        processingTask?.cancel()
-        activeStitchID = nil
-        preview = nil
-        isCurrentPreviewSaved = false
-        errorMessage = nil
-        recoverySuggestion = nil
-        selectedJoinDiagnostics = nil
-        sourceCleanupState = .hidden
-        sourceCleanupError = nil
-        preparationStatus = "Preparing screenshots for stitching…"
-        state = .idle
+        let pendingArchiveTask = prepareForIncomingSources()
+        if pendingArchiveTask == nil {
+            preparationStatus = "Preparing screenshots for stitching…"
+        }
 
         let importer = photosImporter
         processingTask = Task { [weak self] in
+            await pendingArchiveTask?.value
+            guard let owner = self, !Task.isCancelled else { return }
+            guard owner.state != .failed else {
+                owner.processingTask = nil
+                return
+            }
+            owner.preparationStatus = "Preparing screenshots for stitching…"
+
             do {
                 let imported = try await importer.importItems(results) { [weak self] progress in
                     self?.preparationStatus = self?.preparationStatus(for: progress)
@@ -108,9 +109,29 @@ final class ContinuoViewModel {
     }
 
     func importFiles(_ urls: [URL]) {
+        let pendingArchiveTask = prepareForIncomingSources()
+        guard let pendingArchiveTask else {
+            importFileURLs(urls, cancelCurrentTask: false)
+            return
+        }
+
+        processingTask = Task { [weak self] in
+            await pendingArchiveTask.value
+            guard let owner = self, !Task.isCancelled else { return }
+            guard owner.state != .failed else {
+                owner.processingTask = nil
+                return
+            }
+            owner.preparationStatus = "Preparing screenshots for stitching…"
+            owner.importFileURLs(urls, cancelCurrentTask: false)
+            owner.processingTask = nil
+        }
+    }
+
+    private func importFileURLs(_ urls: [URL], cancelCurrentTask: Bool) {
         do {
             let imported = try filesImporter.importFiles(urls)
-            appendSources(imported)
+            appendSources(imported, cancelCurrentTask: cancelCurrentTask)
             logger.info("Imported \(imported.count) still image(s) from Files; waiting for the user to start stitching.")
         } catch {
             showError(error)
@@ -123,21 +144,22 @@ final class ContinuoViewModel {
             return
         }
 
-        processingTask?.cancel()
-        activeStitchID = nil
-        preview = nil
-        isCurrentPreviewSaved = false
-        errorMessage = nil
-        recoverySuggestion = nil
-        selectedJoinDiagnostics = nil
-        sourceCleanupState = .hidden
-        sourceCleanupError = nil
-        preparationStatus = "Finding nearby screenshots that fit together…"
-        state = .idle
+        let pendingArchiveTask = prepareForIncomingSources()
+        if pendingArchiveTask == nil {
+            preparationStatus = "Finding nearby screenshots that fit together…"
+        }
 
         let importer = automaticScreenshotImporter
         let builder = AutomaticScreenshotSequenceBuilder()
         processingTask = Task { [weak self] in
+            await pendingArchiveTask?.value
+            guard let owner = self, !Task.isCancelled else { return }
+            guard owner.state != .failed else {
+                owner.processingTask = nil
+                return
+            }
+            owner.preparationStatus = "Finding nearby screenshots that fit together…"
+
             let (progressStream, progressContinuation) = AsyncStream<StitchProgress>.makeStream()
             let progressTask = Task { @MainActor [weak self] in
                 for await progress in progressStream {
@@ -522,6 +544,11 @@ final class ContinuoViewModel {
     private func appendSources(_ newSources: [SourceImage], cancelCurrentTask: Bool = true) {
         sources.append(contentsOf: newSources)
         resetResult(cancelCurrentTask: cancelCurrentTask)
+    }
+
+    private func prepareForIncomingSources() -> Task<Void, Never>? {
+        resetActiveWorkflow()
+        return historyArchiveTask
     }
 
     private func removeTemporaryWorkingCopies(_ sources: [SourceImage]) {

@@ -878,6 +878,58 @@ final class ContinuoTests: XCTestCase {
     }
 
     @MainActor
+    func testStartingNewImportsRetainsEverySavedStitchInHistory() async throws {
+        let historyRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-multiple-history-\(UUID().uuidString)", isDirectory: true)
+        let firstImportURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-next-first-\(UUID().uuidString).png")
+        let secondImportURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-next-second-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: historyRootURL)
+            try? FileManager.default.removeItem(at: firstImportURL)
+            try? FileManager.default.removeItem(at: secondImportURL)
+        }
+
+        let image = try XCTUnwrap(makeTestImage(width: 4, rows: [0.1, 0.3, 0.6, 0.9]))
+        try writePNG(image, to: firstImportURL)
+        try writePNG(image, to: secondImportURL)
+        let store = HistoryImageStore(directoryURL: historyRootURL)
+        let viewModel = ContinuoViewModel(historyImageStore: store)
+
+        viewModel.preview = StitchPreview(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            placements: [],
+            joins: []
+        )
+        viewModel.markSaveCompleted()
+        viewModel.importFiles([firstImportURL])
+
+        for _ in 0..<200 where viewModel.completedStitches.count < 1 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(viewModel.completedStitches.count, 1)
+        XCTAssertEqual(viewModel.sources.count, 1)
+
+        viewModel.preview = StitchPreview(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            placements: [],
+            joins: []
+        )
+        viewModel.markSaveCompleted()
+        viewModel.importFiles([secondImportURL])
+
+        for _ in 0..<200 where viewModel.completedStitches.count < 2 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(viewModel.completedStitches.count, 2)
+        XCTAssertEqual(try store.load().count, 2)
+        viewModel.clearSources()
+    }
+
+    @MainActor
     func testResetDoesNotArchiveUnsavedStitch() async throws {
         let historyRootURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("continuo-unsaved-history-\(UUID().uuidString)", isDirectory: true)
