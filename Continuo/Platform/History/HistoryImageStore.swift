@@ -3,11 +3,38 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+enum HistoryStorageLocation: String, Codable, CaseIterable, Identifiable, Sendable {
+    case onThisDevice
+    case iCloudDrive
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .onThisDevice:
+            "On This Device"
+        case .iCloudDrive:
+            "iCloud Drive"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .onThisDevice:
+            "iphone"
+        case .iCloudDrive:
+            "icloud"
+        }
+    }
+}
+
 enum HistoryImageStoreError: LocalizedError, Sendable {
     case directoryCreationFailed(String)
     case encodingFailed
     case metadataWriteFailed(String)
     case thumbnailCreationFailed
+    case iCloudUnavailable
+    case migrationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +46,10 @@ enum HistoryImageStoreError: LocalizedError, Sendable {
             "Continuo could not update stitch history: \(message)"
         case .thumbnailCreationFailed:
             "Continuo could not create a lightweight history thumbnail."
+        case .iCloudUnavailable:
+            "iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive before selecting it for history."
+        case let .migrationFailed(message):
+            "Continuo could not move stitch history: \(message)"
         }
     }
 }
@@ -33,20 +64,81 @@ struct HistoryImageAsset: @unchecked Sendable {
 /// removable full-resolution PNG.
 struct HistoryImageStore: @unchecked Sendable {
     private static let thumbnailMaximumPixelSize = 1_600
+    static let iCloudContainerIdentifier = "iCloud.dev.iamshift.Continuo"
 
     private let directoryURL: URL
     private let fileManager: FileManager
+    let location: HistoryStorageLocation
+    let isAvailable: Bool
 
-    init(fileManager: FileManager = .default, directoryURL: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        directoryURL: URL? = nil,
+        location: HistoryStorageLocation = .onThisDevice
+    ) {
         self.fileManager = fileManager
+        self.location = location
+        self.isAvailable = location == .onThisDevice || directoryURL != nil || fileManager.url(forUbiquityContainerIdentifier: Self.iCloudContainerIdentifier) != nil
         if let directoryURL {
             self.directoryURL = directoryURL
+        } else if location == .iCloudDrive {
+            let containerURL = fileManager.url(forUbiquityContainerIdentifier: Self.iCloudContainerIdentifier)
+                ?? fileManager.temporaryDirectory
+            self.directoryURL = containerURL
+                .appendingPathComponent("Documents", isDirectory: true)
+                .appendingPathComponent("Continuo", isDirectory: true)
+                .appendingPathComponent("History", isDirectory: true)
         } else {
             let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
                 ?? fileManager.temporaryDirectory
             self.directoryURL = applicationSupport
                 .appendingPathComponent("Continuo", isDirectory: true)
                 .appendingPathComponent("History", isDirectory: true)
+        }
+    }
+
+    init(fileManager: FileManager = .default, directoryURL: URL) {
+        self.fileManager = fileManager
+        self.location = .onThisDevice
+        self.isAvailable = true
+        self.directoryURL = directoryURL
+    }
+
+    func migrateHistory(to destination: HistoryImageStore) throws {
+        guard location != destination.location || directoryURL != destination.directoryURL else {
+            return
+        }
+
+        do {
+            try destination.createDirectory()
+            let files = try fileManager.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+            for file in files {
+                let target = destination.directoryURL.appendingPathComponent(file.lastPathComponent)
+                if fileManager.fileExists(atPath: target.path) {
+                    try fileManager.removeItem(at: target)
+                }
+                try fileManager.copyItem(at: file, to: target)
+            }
+        } catch {
+            throw HistoryImageStoreError.migrationFailed(error.localizedDescription)
+        }
+    }
+
+    func removeStoredFiles() throws {
+        guard fileManager.fileExists(atPath: directoryURL.path) else {
+            return
+        }
+        let files = try fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        for file in files {
+            try fileManager.removeItem(at: file)
         }
     }
 
@@ -58,6 +150,9 @@ struct HistoryImageStore: @unchecked Sendable {
         sources: [SourceImage] = [],
         sourceImagesDeleted: Bool = false
     ) throws -> HistoryImageAsset {
+        guard isAvailable else {
+            throw HistoryImageStoreError.iCloudUnavailable
+        }
         try createDirectory()
 
         let fullResolutionURL = self.fullResolutionURL(for: id)
@@ -95,6 +190,9 @@ struct HistoryImageStore: @unchecked Sendable {
     }
 
     func load() throws -> [CompletedStitch] {
+        guard isAvailable else {
+            throw HistoryImageStoreError.iCloudUnavailable
+        }
         try createDirectory()
         try migrateLegacyArchives()
         let urls = try fileManager.contentsOfDirectory(
@@ -135,6 +233,9 @@ struct HistoryImageStore: @unchecked Sendable {
     }
 
     func update(_ stitch: CompletedStitch) throws {
+        guard isAvailable else {
+            throw HistoryImageStoreError.iCloudUnavailable
+        }
         try createDirectory()
         try writeRecord(HistoryRecord(
             id: stitch.id,
@@ -150,6 +251,13 @@ struct HistoryImageStore: @unchecked Sendable {
 
     func remove(_ url: URL) {
         try? fileManager.removeItem(at: url)
+    }
+
+    func prepareForExport(_ url: URL) {
+        guard location == .iCloudDrive else {
+            return
+        }
+        try? fileManager.startDownloadingUbiquitousItem(at: url)
     }
 
     private func createDirectory() throws {

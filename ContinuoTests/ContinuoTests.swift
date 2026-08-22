@@ -877,6 +877,34 @@ final class ContinuoTests: XCTestCase {
         XCTAssertEqual(reloaded[0].thumbnail.width, loaded[0].thumbnail.width)
     }
 
+    func testHistoryImageStoreMovesFilesBetweenLocations() throws {
+        let sourceURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-move-source-\(UUID().uuidString)", isDirectory: true)
+        let destinationURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-move-destination-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: destinationURL)
+        }
+
+        let image = try XCTUnwrap(makeTestImage(width: 8, rows: [0.1, 0.3, 0.6, 0.9]))
+        let sourceStore = HistoryImageStore(directoryURL: sourceURL)
+        let destinationStore = HistoryImageStore(directoryURL: destinationURL)
+        let asset = try sourceStore.archive(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            id: UUID()
+        )
+
+        try sourceStore.migrateHistory(to: destinationStore)
+        XCTAssertEqual(try destinationStore.load().count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+
+        try sourceStore.removeStoredFiles()
+        XCTAssertTrue(try sourceStore.load().isEmpty)
+        XCTAssertEqual(try destinationStore.load().count, 1)
+    }
+
     @MainActor
     func testStartingNewImportsRetainsEverySavedStitchInHistory() async throws {
         let historyRootURL = FileManager.default.temporaryDirectory

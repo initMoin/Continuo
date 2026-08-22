@@ -33,6 +33,7 @@ struct ContentView: View {
     @State private var historyShareID: UUID?
     @State private var showingHistoryShareMenu = false
     @State private var showingHistoryDeleteConfirmation = false
+    @State private var showingHistorySettings = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     private let photosExporter = PhotosImageExporter()
@@ -65,6 +66,13 @@ struct ContentView: View {
                         }
                         .accessibilityHint("Select image files")
                         .disabled(isProcessing || isPreparing)
+
+                        Button {
+                            showingHistorySettings = true
+                        } label: {
+                            Label("History storage", systemImage: "externaldrive")
+                        }
+                        .accessibilityHint("Choose where stitch history is stored")
                     }
                 }
         }
@@ -87,6 +95,9 @@ struct ContentView: View {
                 viewModel.importPhotos(results)
                 showingPhotosPicker = false
             }
+        }
+        .sheet(isPresented: $showingHistorySettings) {
+            HistorySettingsView(viewModel: viewModel)
         }
         .onDisappear {
             revealTask?.cancel()
@@ -1404,6 +1415,94 @@ private struct SourceContainerFramePreferenceKey: PreferenceKey {
 
     static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
         value = nextValue()
+    }
+}
+
+private struct HistorySettingsView: View {
+    let viewModel: ContinuoViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var selection: HistoryStorageLocation
+    @State private var isSwitching = false
+    @State private var errorMessage: String?
+
+    init(viewModel: ContinuoViewModel) {
+        self.viewModel = viewModel
+        _selection = State(initialValue: viewModel.historyStorageLocation)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Store stitch history in", selection: $selection) {
+                        ForEach(HistoryStorageLocation.allCases) { location in
+                            Label(location.title, systemImage: location.systemImage)
+                                .tag(location)
+                        }
+                    }
+                    .disabled(isSwitching)
+                    .onChange(of: selection) { _, newValue in
+                        guard newValue != viewModel.historyStorageLocation else { return }
+                        isSwitching = true
+                        errorMessage = nil
+                        Task {
+                            let failure = await viewModel.switchHistoryStorageLocation(to: newValue)
+                            await MainActor.run {
+                                isSwitching = false
+                                if let failure {
+                                    selection = viewModel.historyStorageLocation
+                                    errorMessage = failure
+                                }
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("Thumbnails and full-resolution history files use the selected location. Existing history is moved when you switch.")
+                }
+
+                Section {
+                    Label(
+                        viewModel.historyStorageLocation == .iCloudDrive
+                            ? "History is stored in iCloud Drive."
+                            : "History is stored only on this device.",
+                        systemImage: viewModel.historyStorageLocation.systemImage
+                    )
+                    .foregroundStyle(.secondary)
+                }
+
+                if isSwitching {
+                    Section {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Moving stitch history…")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("History Storage")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                    .disabled(isSwitching)
+                }
+            }
+            .alert(
+                "Couldn’t change history storage",
+                isPresented: Binding(
+                    get: { errorMessage != nil },
+                    set: { if !$0 { errorMessage = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "Continuo could not move stitch history.")
+            }
+        }
     }
 }
 

@@ -33,13 +33,14 @@ final class ContinuoViewModel {
     var sourceCleanupState: SourceCleanupState = .hidden
     var sourceCleanupError: String?
     var preparationStatus: String?
+    private(set) var historyStorageLocation: HistoryStorageLocation
     private(set) var isCurrentPreviewSaved = false
 
     private let photosImporter = PhotosImageImporter()
     private let automaticScreenshotImporter = AutomaticScreenshotImporter()
     private let filesImporter = FileImageImporter()
     private let sourceDeletionService = SourceDeletionService()
-    private let historyImageStore: HistoryImageStore
+    private var historyImageStore: HistoryImageStore
     private let engine = StitchEngine()
     private var processingTask: Task<Void, Never>?
     private var historyArchiveTask: Task<Void, Never>?
@@ -49,13 +50,57 @@ final class ContinuoViewModel {
     /// after the result has been published.
     private var activeStitchID: UUID?
     private let logger = Logger(subsystem: "dev.iamshift.Continuo", category: "stitching")
+    private static let historyStoragePreferenceKey = "historyStorageLocation"
 
-    init(historyImageStore: HistoryImageStore = HistoryImageStore()) {
-        self.historyImageStore = historyImageStore
+    init(historyImageStore: HistoryImageStore? = nil) {
+        let preferredLocation = HistoryStorageLocation(
+            rawValue: UserDefaults.standard.string(forKey: Self.historyStoragePreferenceKey) ?? ""
+        ) ?? .onThisDevice
+        let configuredStore = historyImageStore ?? HistoryImageStore(location: preferredLocation)
+        let usableStore = configuredStore.isAvailable ? configuredStore : HistoryImageStore()
+        self.historyImageStore = usableStore
+        self.historyStorageLocation = usableStore.location
         do {
-            completedStitches = try historyImageStore.load()
+            completedStitches = try usableStore.load()
         } catch {
             logger.error("Could not load stitch history: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    var isHistoryStorageAvailable: Bool {
+        historyImageStore.isAvailable
+    }
+
+    func switchHistoryStorageLocation(to location: HistoryStorageLocation) async -> String? {
+        guard location != historyStorageLocation else {
+            return nil
+        }
+
+        let currentStore = historyImageStore
+        let destinationStore = HistoryImageStore(location: location)
+        guard destinationStore.isAvailable else {
+            return HistoryImageStoreError.iCloudUnavailable.localizedDescription
+        }
+
+        do {
+            try await Task.detached(priority: .utility) {
+                try currentStore.migrateHistory(to: destinationStore)
+            }.value
+            let loaded = try await Task.detached(priority: .utility) {
+                try destinationStore.load()
+            }.value
+            try await Task.detached(priority: .utility) {
+                try currentStore.removeStoredFiles()
+            }.value
+            historyImageStore = destinationStore
+            historyStorageLocation = location
+            completedStitches = loaded
+            UserDefaults.standard.set(location.rawValue, forKey: Self.historyStoragePreferenceKey)
+            logger.info("Moved stitch history to \(location.rawValue, privacy: .public).")
+            return nil
+        } catch {
+            logger.error("Could not move stitch history to \(location.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return error.localizedDescription
         }
     }
 
@@ -471,6 +516,7 @@ final class ContinuoViewModel {
         else {
             return nil
         }
+        historyImageStore.prepareForExport(url)
         return url
     }
 
