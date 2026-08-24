@@ -34,6 +34,8 @@ enum HistoryImageStoreError: LocalizedError, Sendable {
     case metadataWriteFailed(String)
     case thumbnailCreationFailed
     case iCloudUnavailable
+    case exportDownloadFailed(String)
+    case exportDownloadTimedOut
     case migrationFailed(String)
 
     var errorDescription: String? {
@@ -48,6 +50,10 @@ enum HistoryImageStoreError: LocalizedError, Sendable {
             "Continuo could not create a lightweight history thumbnail."
         case .iCloudUnavailable:
             "iCloud Drive is unavailable. Sign in to iCloud and enable iCloud Drive before selecting it for history."
+        case let .exportDownloadFailed(message):
+            "Continuo could not download the full-resolution history image from iCloud Drive: \(message)"
+        case .exportDownloadTimedOut:
+            "Continuo is still downloading the full-resolution history image from iCloud Drive. Try again when it is available."
         case let .migrationFailed(message):
             "Continuo could not move stitch history: \(message)"
         }
@@ -253,11 +259,44 @@ struct HistoryImageStore: @unchecked Sendable {
         try? fileManager.removeItem(at: url)
     }
 
-    func prepareForExport(_ url: URL) {
+    /// Ensures an iCloud-backed asset has been downloaded before an exporter
+    /// reads or transfers it. Local history files are immediately ready.
+    func prepareForExport(_ url: URL) async throws {
         guard location == .iCloudDrive else {
             return
         }
-        try? fileManager.startDownloadingUbiquitousItem(at: url)
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+
+        do {
+            try fileManager.startDownloadingUbiquitousItem(at: url)
+        } catch {
+            throw HistoryImageStoreError.exportDownloadFailed(error.localizedDescription)
+        }
+
+        for _ in 0..<60 {
+            try Task.checkCancellation()
+            do {
+                let values = try url.resourceValues(forKeys: [
+                    .ubiquitousItemDownloadingStatusKey,
+                    .ubiquitousItemDownloadingErrorKey
+                ])
+                if let error = values.ubiquitousItemDownloadingError {
+                    throw HistoryImageStoreError.exportDownloadFailed(error.localizedDescription)
+                }
+                if values.ubiquitousItemDownloadingStatus == .current {
+                    return
+                }
+            } catch let error as HistoryImageStoreError {
+                throw error
+            } catch {
+                throw HistoryImageStoreError.exportDownloadFailed(error.localizedDescription)
+            }
+            try await Task.sleep(for: .seconds(1))
+        }
+
+        throw HistoryImageStoreError.exportDownloadTimedOut
     }
 
     private func createDirectory() throws {

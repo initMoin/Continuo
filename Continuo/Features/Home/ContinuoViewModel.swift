@@ -508,15 +508,15 @@ final class ContinuoViewModel {
         await historyArchiveTask?.value
     }
 
-    func historyExportURL(for id: UUID) -> URL? {
+    func historyExportURL(for id: UUID) async throws -> URL {
         guard
             let stitch = completedStitches.first(where: { $0.id == id }),
             let url = stitch.fullResolutionURL,
             FileManager.default.fileExists(atPath: url.path)
         else {
-            return nil
+            throw CocoaError(.fileNoSuchFile)
         }
-        historyImageStore.prepareForExport(url)
+        try await historyImageStore.prepareForExport(url)
         return url
     }
 

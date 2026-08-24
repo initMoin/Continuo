@@ -28,6 +28,7 @@ struct ContentView: View {
     @State private var historyExportID: UUID?
     @State private var exportError: String?
     @State private var isSavingToPhotos = false
+    @State private var isPreparingHistoryAsset = false
     @State private var showingSaveConfirmation = false
     @State private var showingDeleteConfirmation = false
     @State private var historyShareID: UUID?
@@ -235,8 +236,10 @@ struct ContentView: View {
                     } else if let errorMessage = viewModel.errorMessage {
                         failureView(message: errorMessage)
                     } else if let preview = viewModel.preview {
-                        stitchedPreviewView(preview)
+                        Color.clear
+                            .frame(height: 1)
                             .id(stitchedOutputAnchor)
+                        stitchedPreviewView(preview)
                             .transition(.opacity.combined(with: .scale(scale: 0.98)))
                     } else if viewModel.sources.count >= 2 {
                         stitchActionView
@@ -839,6 +842,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.bordered)
+                .disabled(isPreparingHistoryAsset || isSavingToPhotos)
 
                 Button {
                     showingHistoryShareMenu = false
@@ -848,6 +852,7 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.bordered)
+                .disabled(isPreparingHistoryAsset || isSavingToPhotos)
             }
 
             if !stitch.sourceImagesDeleted, !stitch.sources.isEmpty {
@@ -1026,18 +1031,20 @@ struct ContentView: View {
     }
 
     private func prepareHistoryExport(for stitch: CompletedStitch) {
-        guard let fileURL = viewModel.historyExportURL(for: stitch.id) else {
-            exportError = "The full-resolution history image is no longer available."
-            return
-        }
+        guard !isPreparingHistoryAsset else { return }
+        isPreparingHistoryAsset = true
 
-        do {
-            exportDocument = try StitchedImageDocument(fileURL: fileURL)
-            exportTarget = .history
-            historyExportID = stitch.id
-            showingExport = true
-        } catch {
-            exportError = error.localizedDescription
+        Task { @MainActor in
+            defer { isPreparingHistoryAsset = false }
+            do {
+                let fileURL = try await viewModel.historyExportURL(for: stitch.id)
+                exportDocument = try StitchedImageDocument(fileURL: fileURL)
+                exportTarget = .history
+                historyExportID = stitch.id
+                showingExport = true
+            } catch {
+                exportError = error.localizedDescription
+            }
         }
     }
 
@@ -1061,20 +1068,19 @@ struct ContentView: View {
     }
 
     private func saveHistoryToPhotos(id: UUID) {
-        guard !isSavingToPhotos else { return }
-        guard let fileURL = viewModel.historyExportURL(for: id) else {
-            exportError = "The full-resolution history image is no longer available."
-            return
-        }
-
-        isSavingToPhotos = true
+        guard !isSavingToPhotos, !isPreparingHistoryAsset else { return }
+        isPreparingHistoryAsset = true
         Task { @MainActor in
             do {
+                let fileURL = try await viewModel.historyExportURL(for: id)
+                isPreparingHistoryAsset = false
+                isSavingToPhotos = true
                 try await photosExporter.save(fileURL: fileURL)
                 viewModel.consumeHistoryAsset(id: id)
                 isSavingToPhotos = false
                 showingSaveConfirmation = true
             } catch {
+                isPreparingHistoryAsset = false
                 isSavingToPhotos = false
                 exportError = error.localizedDescription
             }

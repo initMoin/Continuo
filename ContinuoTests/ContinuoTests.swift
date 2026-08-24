@@ -905,6 +905,23 @@ final class ContinuoTests: XCTestCase {
         XCTAssertEqual(try destinationStore.load().count, 1)
     }
 
+    func testLocalHistoryAssetIsImmediatelyReadyForExport() async throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-export-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let image = try XCTUnwrap(makeTestImage(width: 8, rows: [0.1, 0.3, 0.6, 0.9]))
+        let store = HistoryImageStore(directoryURL: rootURL)
+        let asset = try store.archive(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            id: UUID()
+        )
+
+        try await store.prepareForExport(asset.fullResolutionURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+    }
+
     @MainActor
     func testStartingNewImportsRetainsEverySavedStitchInHistory() async throws {
         let historyRootURL = FileManager.default.temporaryDirectory
