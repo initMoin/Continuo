@@ -48,13 +48,29 @@ public struct PixelCompositor: Sendable {
         frames: [Rect2D],
         seamPositions: [Double]
     ) throws -> CGImage {
+        try compose(
+            imageCount: images.count,
+            frames: frames,
+            seamPositions: seamPositions,
+            imageProvider: { images[$0] }
+        )
+    }
+
+    /// Composites sources supplied on demand so callers do not need to retain
+    /// every full-resolution decoded image at once.
+    func compose(
+        imageCount: Int,
+        frames: [Rect2D],
+        seamPositions: [Double],
+        imageProvider: (Int) throws -> CGImage
+    ) throws -> CGImage {
         try Task.checkCancellation()
 
-        guard !images.isEmpty else {
+        guard imageCount > 0 else {
             throw PixelCompositingError.noImages
         }
-        guard images.count == frames.count,
-              seamPositions.count == images.count else {
+        guard imageCount == frames.count,
+              seamPositions.count == imageCount else {
             throw PixelCompositingError.countMismatch
         }
 
@@ -73,11 +89,11 @@ public struct PixelCompositor: Sendable {
             throw PixelCompositingError.imageCreationFailed
         }
 
-        var output = [UInt8](repeating: 255, count: canvasWidth * canvasHeight * 4)
+        var output = Data(repeating: 255, count: canvasWidth * canvasHeight * 4)
 
-        for index in images.indices {
+        for index in 0..<imageCount {
             try Task.checkCancellation()
-            let source = try RGBA8Bitmap(image: images[index])
+            let source = try RGBA8Bitmap(image: imageProvider(index))
             let frame = translatedFrames[index]
             let imageSize = PixelSize(width: source.width, height: source.height)
             let frameSize = PixelSize(width: frame.width, height: frame.height)
@@ -112,42 +128,60 @@ public struct PixelCompositor: Sendable {
                 }
                 let outputY = frame.y + sourceY
 
-                for sourceX in 0..<source.width {
-                    let outputX = frame.x + sourceX
-                    let isInOverlap = outputX >= overlap.minX &&
-                        outputX < overlap.maxX &&
-                        outputY >= overlap.minY &&
-                        outputY < overlap.maxY
+                if outputY < overlap.minY ||
+                    outputY >= overlap.maxY ||
+                    sourceY >= seamBand.end {
+                    copyRowRange(
+                        0..<source.width,
+                        from: source,
+                        sourceY: sourceY,
+                        into: &output,
+                        at: frame,
+                        canvasWidth: canvasWidth
+                    )
+                    continue
+                }
 
-                    if !isInOverlap || sourceY >= seamBand.end {
-                        copyPixel(
-                            from: source,
-                            sourceX: sourceX,
-                            sourceY: sourceY,
-                            into: &output,
-                            outputX: outputX,
-                            outputY: outputY,
-                            canvasWidth: canvasWidth
-                        )
-                    } else if sourceY >= seamBand.start {
-                        blendPixelIfNeeded(
-                            from: source,
-                            sourceX: sourceX,
-                            sourceY: sourceY,
-                            into: &output,
-                            outputX: outputX,
-                            outputY: outputY,
-                            canvasWidth: canvasWidth,
-                            incomingAlpha: seamBand.alpha(for: sourceY)
-                        )
-                    }
-                    // Rows before the seam deliberately retain the already
-                    // composited previous result byte-for-byte.
+                let overlapStartX = max(0, overlap.minX - frame.x)
+                let overlapEndX = min(source.width, overlap.maxX - frame.x)
+                copyRowRange(
+                    0..<overlapStartX,
+                    from: source,
+                    sourceY: sourceY,
+                    into: &output,
+                    at: frame,
+                    canvasWidth: canvasWidth
+                )
+                copyRowRange(
+                    overlapEndX..<source.width,
+                    from: source,
+                    sourceY: sourceY,
+                    into: &output,
+                    at: frame,
+                    canvasWidth: canvasWidth
+                )
+
+                guard sourceY >= seamBand.start else {
+                    // The previous image owns the shared pixels before the
+                    // seam; only non-overlapping side ranges were copied.
+                    continue
+                }
+                for sourceX in overlapStartX..<overlapEndX {
+                    blendPixelIfNeeded(
+                        from: source,
+                        sourceX: sourceX,
+                        sourceY: sourceY,
+                        into: &output,
+                        outputX: frame.x + sourceX,
+                        outputY: outputY,
+                        canvasWidth: canvasWidth,
+                        incomingAlpha: seamBand.alpha(for: sourceY)
+                    )
                 }
             }
         }
 
-        guard let provider = CGDataProvider(data: Data(output) as CFData),
+        guard let provider = CGDataProvider(data: output as CFData),
               let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let image = CGImage(
                   width: canvasWidth,
@@ -201,48 +235,76 @@ public struct PixelCompositor: Sendable {
 
     private func copyWholeImage(
         _ source: RGBA8Bitmap,
-        into output: inout [UInt8],
+        into output: inout Data,
         at frame: PixelFrame,
         canvasWidth: Int
     ) throws {
-        for sourceY in 0..<source.height {
-            if sourceY.isMultiple(of: 64) {
-                try Task.checkCancellation()
-            }
-            let sourceOffset = sourceY * source.bytesPerRow
-            let outputOffset = ((frame.y + sourceY) * canvasWidth + frame.x) * 4
-            output.withUnsafeMutableBytes { outputBytes in
-                source.bytes.withUnsafeBytes { sourceBytes in
-                    let destination = outputBytes.baseAddress!.advanced(by: outputOffset)
-                    let origin = sourceBytes.baseAddress!.advanced(by: sourceOffset)
-                    destination.copyMemory(from: origin, byteCount: source.width * 4)
+        try output.withUnsafeMutableBytes { outputBytes in
+            try source.bytes.withUnsafeBytes { sourceBytes in
+                guard
+                    let outputBaseAddress = outputBytes.baseAddress,
+                    let sourceBaseAddress = sourceBytes.baseAddress
+                else {
+                    throw PixelCompositingError.imageCreationFailed
+                }
+
+                let rowByteCount = source.width * 4
+                for sourceY in 0..<source.height {
+                    if sourceY.isMultiple(of: 64) {
+                        try Task.checkCancellation()
+                    }
+                    let sourceOffset = sourceY * source.bytesPerRow
+                    let outputOffset = (
+                        ((frame.y + sourceY) * canvasWidth) + frame.x
+                    ) * 4
+                    outputBaseAddress
+                        .advanced(by: outputOffset)
+                        .copyMemory(
+                            from: sourceBaseAddress.advanced(by: sourceOffset),
+                            byteCount: rowByteCount
+                        )
                 }
             }
         }
     }
 
-    private func copyPixel(
+    private func copyRowRange(
+        _ sourceXRange: Range<Int>,
         from source: RGBA8Bitmap,
-        sourceX: Int,
         sourceY: Int,
-        into output: inout [UInt8],
-        outputX: Int,
-        outputY: Int,
+        into output: inout Data,
+        at frame: PixelFrame,
         canvasWidth: Int
     ) {
-        let sourceOffset = (sourceY * source.bytesPerRow) + (sourceX * 4)
-        let outputOffset = ((outputY * canvasWidth) + outputX) * 4
-        output[outputOffset] = source.bytes[sourceOffset]
-        output[outputOffset + 1] = source.bytes[sourceOffset + 1]
-        output[outputOffset + 2] = source.bytes[sourceOffset + 2]
-        output[outputOffset + 3] = 255
+        guard !sourceXRange.isEmpty else { return }
+        let sourceOffset = (sourceY * source.bytesPerRow) + (sourceXRange.lowerBound * 4)
+        let outputOffset = (
+            ((frame.y + sourceY) * canvasWidth) + frame.x + sourceXRange.lowerBound
+        ) * 4
+        let byteCount = sourceXRange.count * 4
+        output.withUnsafeMutableBytes { outputBytes in
+            source.bytes.withUnsafeBytes { sourceBytes in
+                guard
+                    let outputBaseAddress = outputBytes.baseAddress,
+                    let sourceBaseAddress = sourceBytes.baseAddress
+                else {
+                    return
+                }
+                outputBaseAddress
+                    .advanced(by: outputOffset)
+                    .copyMemory(
+                        from: sourceBaseAddress.advanced(by: sourceOffset),
+                        byteCount: byteCount
+                    )
+            }
+        }
     }
 
     private func blendPixelIfNeeded(
         from source: RGBA8Bitmap,
         sourceX: Int,
         sourceY: Int,
-        into output: inout [UInt8],
+        into output: inout Data,
         outputX: Int,
         outputY: Int,
         canvasWidth: Int,
@@ -353,7 +415,12 @@ private struct RGBA8Bitmap: Sendable {
                     }
                 }
             }
-            self.bytes = Self.makeOpaque(directBytes, alphaInfo: image.alphaInfo, premultiplied: image.alphaInfo == .premultipliedLast)
+            Self.makeOpaque(
+                &directBytes,
+                alphaInfo: image.alphaInfo,
+                premultiplied: image.alphaInfo == .premultipliedLast
+            )
+            self.bytes = directBytes
             return
         }
 
@@ -399,12 +466,15 @@ private struct RGBA8Bitmap: Sendable {
         return byteOrder == 0
     }
 
-    private static func makeOpaque(_ bytes: [UInt8], alphaInfo: CGImageAlphaInfo, premultiplied: Bool) -> [UInt8] {
+    private static func makeOpaque(
+        _ bytes: inout [UInt8],
+        alphaInfo: CGImageAlphaInfo,
+        premultiplied: Bool
+    ) {
         guard alphaInfo != .none, alphaInfo != .noneSkipLast else {
-            return bytes
+            return
         }
 
-        var bytes = bytes
         for offset in stride(from: 0, to: bytes.count, by: 4) {
             let alpha = bytes[offset + 3]
             guard alpha < 255 else { continue }
@@ -422,6 +492,5 @@ private struct RGBA8Bitmap: Sendable {
             }
             bytes[offset + 3] = 255
         }
-        return bytes
     }
 }

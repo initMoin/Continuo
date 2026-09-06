@@ -1,12 +1,22 @@
-# Xcode user and build state
-DerivedData/
-build/
+# Xcode user data
 xcuserdata/
 *.xcuserstate
 
+# Build products
+DerivedData/
+build/
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+
 # Test and profiling output
-*.xcresult/
+*.xcresult
 *.profraw
 
-# macOS metadata
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# macOS
 .DS_Store

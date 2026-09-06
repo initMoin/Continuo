@@ -4,15 +4,18 @@ public struct AutomaticScreenshotSequenceBuilder: Sendable {
     public var configuration: AutomaticScreenshotSelectionConfiguration
     public var normalizer: ImageNormalizer
     public var registrar: PairwiseRegistrar
+    public var maximumConcurrentRegistrations: Int
 
     public init(
         configuration: AutomaticScreenshotSelectionConfiguration = AutomaticScreenshotSelectionConfiguration(),
         normalizer: ImageNormalizer = ImageNormalizer(),
-        registrar: PairwiseRegistrar = PairwiseRegistrar()
+        registrar: PairwiseRegistrar = PairwiseRegistrar(),
+        maximumConcurrentRegistrations: Int = 2
     ) {
         self.configuration = configuration
         self.normalizer = normalizer
         self.registrar = registrar
+        self.maximumConcurrentRegistrations = max(1, maximumConcurrentRegistrations)
     }
 
     public func select(
@@ -36,15 +39,76 @@ public struct AutomaticScreenshotSequenceBuilder: Sendable {
             throw ContinuoError.noMatchingScreenshotSequence
         }
 
-        var pairCount = 0
+        let candidatePairs = makeCandidatePairs(in: candidates)
+        guard !candidatePairs.isEmpty else {
+            throw ContinuoError.noMatchingScreenshotSequence
+        }
+
+        var normalizedByID: [UUID: NormalizedImage] = [:]
+        normalizedByID.reserveCapacity(candidates.count)
+
+        progress(StitchProgress(
+            stage: .normalizing,
+            completed: 0,
+            total: candidates.count,
+            message: "Preparing candidate screenshots…"
+        ))
+
+        // The Photos adapter has already reduced discovery to one bounded
+        // session of small previews, so normalizing each candidate once avoids
+        // repeated decode work while keeping memory use predictable.
+        for (index, candidate) in candidates.enumerated() {
+            try Task.checkCancellation()
+            normalizedByID[candidate.id] = try normalizer.normalize(candidate)
+            progress(StitchProgress(
+                stage: .normalizing,
+                completed: index + 1,
+                total: candidates.count,
+                message: "Prepared candidate screenshot \(index + 1) of \(candidates.count)."
+            ))
+        }
+
+        let selector = AutomaticScreenshotSequenceSelector(configuration: configuration)
+        let forwardJoins = try await register(
+            candidatePairs,
+            candidates: candidates,
+            normalizedByID: normalizedByID,
+            reverseDirection: false,
+            progress: progress
+        )
+        if let selection = selector.select(sources: candidates, joins: forwardJoins) {
+            return selection
+        }
+
+        // Most screenshot sequences follow capture chronology. Only pay for
+        // reverse registration when that common path produced no accepted
+        // sequence.
+        let reverseJoins = try await register(
+            candidatePairs,
+            candidates: candidates,
+            normalizedByID: normalizedByID,
+            reverseDirection: true,
+            progress: progress
+        )
+        guard let selection = selector.select(
+            sources: candidates,
+            joins: forwardJoins + reverseJoins
+        ) else {
+            throw ContinuoError.noMatchingScreenshotSequence
+        }
+        return selection
+    }
+
+    private func makeCandidatePairs(
+        in candidates: [SourceImage]
+    ) -> [(fromIndex: Int, toIndex: Int)] {
+        var pairs: [(fromIndex: Int, toIndex: Int)] = []
         for startIndex in candidates.indices {
             let endIndex = min(
                 candidates.count - 1,
                 startIndex + configuration.maximumLookahead
             )
-            guard startIndex < endIndex else {
-                continue
-            }
+            guard startIndex < endIndex else { continue }
 
             for nextIndex in (startIndex + 1)...endIndex {
                 let from = candidates[startIndex]
@@ -55,120 +119,84 @@ public struct AutomaticScreenshotSequenceBuilder: Sendable {
                 else {
                     continue
                 }
-                pairCount += 2
+                pairs.append((fromIndex: startIndex, toIndex: nextIndex))
             }
         }
+        return pairs
+    }
 
-        guard pairCount > 0 else {
-            throw ContinuoError.noMatchingScreenshotSequence
+    private func register(
+        _ pairs: [(fromIndex: Int, toIndex: Int)],
+        candidates: [SourceImage],
+        normalizedByID: [UUID: NormalizedImage],
+        reverseDirection: Bool,
+        progress: @escaping @Sendable (StitchProgress) -> Void
+    ) async throws -> [JoinResult] {
+        let workItems = pairs.compactMap { pair -> RegistrationWorkItem? in
+            guard
+                candidates.indices.contains(pair.fromIndex),
+                candidates.indices.contains(pair.toIndex),
+                let chronologicalFrom = normalizedByID[candidates[pair.fromIndex].id],
+                let chronologicalTo = normalizedByID[candidates[pair.toIndex].id]
+            else {
+                return nil
+            }
+            return RegistrationWorkItem(
+                from: reverseDirection ? chronologicalTo : chronologicalFrom,
+                to: reverseDirection ? chronologicalFrom : chronologicalTo
+            )
         }
+        guard !workItems.isEmpty else { return [] }
 
-        var normalizedByID: [UUID: NormalizedImage] = [:]
-        normalizedByID.reserveCapacity(configuration.maximumLookahead + 1)
-        var joins: [JoinResult] = []
-        joins.reserveCapacity(pairCount)
-        var completedPairs = 0
-        var normalizedCount = 0
-
+        let registrar = registrar
+        let concurrency = min(maximumConcurrentRegistrations, workItems.count)
+        let directionDescription = reverseDirection ? " in reverse order" : ""
+        var joins = [JoinResult?](repeating: nil, count: workItems.count)
+        var nextWorkIndex = 0
+        var completed = 0
         progress(StitchProgress(
-            stage: .normalizing,
+            stage: .registering,
             completed: 0,
-            total: candidates.count,
-            message: "Preparing candidate screenshots…"
+            total: workItems.count,
+            message: "Comparing nearby screenshots\(directionDescription)…"
         ))
 
-        // Keep only the current source and the bounded lookahead window in
-        // memory. Automatic discovery may inspect dozens of full-resolution
-        // screenshots, so retaining every decoded image would defeat the
-        // engine's memory constraints.
-        for startIndex in candidates.indices {
-            try Task.checkCancellation()
-            let endIndex = min(
-                candidates.count - 1,
-                startIndex + configuration.maximumLookahead
-            )
-            guard startIndex < endIndex else {
-                continue
-            }
-
-            for nextIndex in (startIndex + 1)...endIndex {
-                let fromSource = candidates[startIndex]
-                let toSource = candidates[nextIndex]
-                guard
-                    temporallyCompatible(from: fromSource, to: toSource),
-                    dimensionsCompatible(from: fromSource, to: toSource)
-                else {
-                    continue
-                }
-
-                try Task.checkCancellation()
-                let from: NormalizedImage
-                if let cached = normalizedByID[fromSource.id] {
-                    from = cached
-                } else {
-                    from = try normalizer.normalize(fromSource)
-                    normalizedByID[fromSource.id] = from
-                    normalizedCount += 1
-                    progress(StitchProgress(
-                        stage: .normalizing,
-                        completed: normalizedCount,
-                        total: candidates.count,
-                        message: "Prepared candidate screenshot \(normalizedCount) of \(candidates.count)."
-                    ))
-                }
-
-                let to: NormalizedImage
-                if let cached = normalizedByID[toSource.id] {
-                    to = cached
-                } else {
-                    to = try normalizer.normalize(toSource)
-                    normalizedByID[toSource.id] = to
-                    normalizedCount += 1
-                    progress(StitchProgress(
-                        stage: .normalizing,
-                        completed: normalizedCount,
-                        total: candidates.count,
-                        message: "Prepared candidate screenshot \(normalizedCount) of \(candidates.count)."
-                    ))
-                }
-
-                for pair in [(from: from, to: to), (from: to, to: from)] {
-                    completedPairs += 1
-                    progress(StitchProgress(
-                        stage: .registering,
-                        completed: completedPairs - 1,
-                        total: pairCount,
-                        message: "Comparing nearby screenshots \(completedPairs) of \(pairCount)…"
-                    ))
-                    joins.append(try await registrar.register(from: pair.from, to: pair.to))
-                    progress(StitchProgress(
-                        stage: .registering,
-                        completed: completedPairs,
-                        total: pairCount,
-                        message: "Compared nearby screenshots \(completedPairs) of \(pairCount)."
-                    ))
+        try await withThrowingTaskGroup(of: (Int, JoinResult).self) { group in
+            for _ in 0..<concurrency {
+                let resultIndex = nextWorkIndex
+                let work = workItems[resultIndex]
+                nextWorkIndex += 1
+                group.addTask {
+                    (resultIndex, try await registrar.register(from: work.from, to: work.to))
                 }
             }
 
-            let nextStart = startIndex + 1
-            guard nextStart < candidates.count else {
-                normalizedByID.removeAll()
-                continue
+            while let (resultIndex, join) = try await group.next() {
+                joins[resultIndex] = join
+                completed += 1
+                progress(StitchProgress(
+                    stage: .registering,
+                    completed: completed,
+                    total: workItems.count,
+                    message: "Compared \(completed) of \(workItems.count) nearby screenshots\(directionDescription)."
+                ))
+
+                guard nextWorkIndex < workItems.count else { continue }
+                let nextResultIndex = nextWorkIndex
+                let work = workItems[nextResultIndex]
+                nextWorkIndex += 1
+                group.addTask {
+                    (nextResultIndex, try await registrar.register(from: work.from, to: work.to))
+                }
             }
-            let keepEnd = min(
-                candidates.count - 1,
-                nextStart + configuration.maximumLookahead
-            )
-            let retainedIDs = Set(candidates[nextStart...keepEnd].map(\.id))
-            normalizedByID = normalizedByID.filter { retainedIDs.contains($0.key) }
         }
 
-        guard let selection = AutomaticScreenshotSequenceSelector(configuration: configuration)
-            .select(sources: candidates, joins: joins)
-        else {
-            throw ContinuoError.noMatchingScreenshotSequence
-        }
-        return selection
+        return joins.compactMap { $0 }
+    }
+
+    private struct RegistrationWorkItem: Sendable {
+        let from: NormalizedImage
+        let to: NormalizedImage
     }
 
     private func temporallyCompatible(from: SourceImage, to: SourceImage) -> Bool {

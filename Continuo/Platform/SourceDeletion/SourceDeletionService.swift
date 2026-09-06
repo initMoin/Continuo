@@ -39,12 +39,19 @@ struct SourceDeletionService: Sendable {
             throw SourceDeletionError.noDeletableSources
         }
 
-        let photosSources = sources.filter { $0.sourceOrigin == .photos }
-        let fileSources = sources.filter { $0.sourceOrigin == .files }
-        let unsupportedSources = sources.filter { $0.sourceOrigin == .unknown }
-
-        if let unsupportedSource = unsupportedSources.first {
-            throw SourceDeletionError.unsupportedSource(displayName(for: unsupportedSource))
+        var photosSources: [SourceImage] = []
+        var fileSources: [SourceImage] = []
+        photosSources.reserveCapacity(sources.count)
+        fileSources.reserveCapacity(sources.count)
+        for source in sources {
+            switch source.sourceOrigin {
+            case .photos:
+                photosSources.append(source)
+            case .files:
+                fileSources.append(source)
+            case .unknown:
+                throw SourceDeletionError.unsupportedSource(displayName(for: source))
+            }
         }
         guard !photosSources.isEmpty || !fileSources.isEmpty else {
             throw SourceDeletionError.noDeletableSources

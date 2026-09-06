@@ -36,7 +36,7 @@ enum HistoryImageStoreError: LocalizedError, Sendable {
     case iCloudUnavailable
     case exportDownloadFailed(String)
     case exportDownloadTimedOut
-    case migrationFailed(String)
+    case migrationFailed(String, completed: Int?, total: Int?)
 
     var errorDescription: String? {
         switch self {
@@ -54,8 +54,89 @@ enum HistoryImageStoreError: LocalizedError, Sendable {
             "Continuo could not download the full-resolution history image from iCloud Drive: \(message)"
         case .exportDownloadTimedOut:
             "Continuo is still downloading the full-resolution history image from iCloud Drive. Try again when it is available."
-        case let .migrationFailed(message):
-            "Continuo could not move stitch history: \(message)"
+        case let .migrationFailed(message, completed, total):
+            if let completed, let total, total > 0, completed < total {
+                "History transfer incomplete: moved \(completed) of \(total) files. \(message)"
+            } else {
+                "Continuo could not move stitch history: \(message)"
+            }
+        }
+    }
+}
+
+struct HistoryTransferProgress: Sendable, Equatable {
+    enum Phase: String, Sendable {
+        case preparing
+        case copying
+        case loading
+        case cleaning
+        case finished
+    }
+
+    let phase: Phase
+    let completed: Int
+    let total: Int
+    let currentFile: String?
+
+    var fraction: Double {
+        guard total > 0 else {
+            return phase == .finished ? 1 : 0
+        }
+        return min(1, max(0, Double(completed) / Double(total)))
+    }
+
+    var message: String {
+        switch phase {
+        case .preparing:
+            "Preparing history transfer…"
+        case .copying:
+            if let currentFile {
+                "Moving \(currentFile)…"
+            } else {
+                "Moving stitch history…"
+            }
+        case .loading:
+            "Reloading history at the new location…"
+        case .cleaning:
+            "Cleaning up the previous history location…"
+        case .finished:
+            "History transfer complete."
+        }
+    }
+}
+
+struct HistoryTransferResult: Sendable, Equatable {
+    let source: HistoryStorageLocation
+    let destination: HistoryStorageLocation
+    let copiedFileCount: Int
+
+    var message: String {
+        let fileWord = copiedFileCount == 1 ? "file" : "files"
+        return "Moved \(copiedFileCount) history \(fileWord) from \(source.title) to \(destination.title). Metadata, thumbnails, and full-resolution PNGs are stored in separate folders."
+    }
+}
+
+struct HistoryAssetPreparationProgress: Sendable, Equatable {
+    enum Phase: String, Sendable {
+        case checking
+        case requestingDownload
+        case downloading
+        case ready
+    }
+
+    let phase: Phase
+    let fraction: Double?
+
+    var message: String {
+        switch phase {
+        case .checking:
+            "Checking the full-resolution stitch…"
+        case .requestingDownload:
+            "Requesting the full-resolution stitch from iCloud…"
+        case .downloading:
+            "Downloading the full-resolution stitch from iCloud…"
+        case .ready:
+            "Full-resolution stitch is ready."
         }
     }
 }
@@ -110,27 +191,55 @@ struct HistoryImageStore: @unchecked Sendable {
         self.directoryURL = directoryURL
     }
 
-    func migrateHistory(to destination: HistoryImageStore) throws {
+    func migrateHistory(
+        to destination: HistoryImageStore,
+        progress: @escaping @Sendable (HistoryTransferProgress) -> Void = { _ in }
+    ) throws -> HistoryTransferResult {
         guard location != destination.location || directoryURL != destination.directoryURL else {
-            return
+            return HistoryTransferResult(source: location, destination: destination.location, copiedFileCount: 0)
         }
 
+        var completed = 0
+        var total = 0
         do {
             try destination.createDirectory()
-            let files = try fileManager.contentsOfDirectory(
-                at: directoryURL,
-                includingPropertiesForKeys: nil,
-                options: [.skipsHiddenFiles]
-            )
-            for file in files {
-                let target = destination.directoryURL.appendingPathComponent(file.lastPathComponent)
+            let files = try storedFiles()
+            total = files.count
+            progress(HistoryTransferProgress(
+                phase: .preparing,
+                completed: completed,
+                total: total,
+                currentFile: nil
+            ))
+            for (index, file) in files.enumerated() {
+                let target = destination.migrationURL(for: file, relativeTo: directoryURL)
+                try fileManager.createDirectory(
+                    at: target.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
                 if fileManager.fileExists(atPath: target.path) {
                     try fileManager.removeItem(at: target)
                 }
                 try fileManager.copyItem(at: file, to: target)
+                completed = index + 1
+                progress(HistoryTransferProgress(
+                    phase: .copying,
+                    completed: completed,
+                    total: total,
+                    currentFile: file.lastPathComponent
+                ))
             }
+            return HistoryTransferResult(
+                source: location,
+                destination: destination.location,
+                copiedFileCount: completed
+            )
         } catch {
-            throw HistoryImageStoreError.migrationFailed(error.localizedDescription)
+            throw HistoryImageStoreError.migrationFailed(
+                error.localizedDescription,
+                completed: completed,
+                total: total
+            )
         }
     }
 
@@ -138,11 +247,7 @@ struct HistoryImageStore: @unchecked Sendable {
         guard fileManager.fileExists(atPath: directoryURL.path) else {
             return
         }
-        let files = try fileManager.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )
+        let files = try storedFiles()
         for file in files {
             try fileManager.removeItem(at: file)
         }
@@ -201,28 +306,29 @@ struct HistoryImageStore: @unchecked Sendable {
         }
         try createDirectory()
         try migrateLegacyArchives()
-        let urls = try fileManager.contentsOfDirectory(
-            at: directoryURL,
+        let decoder = JSONDecoder()
+        var stitches: [CompletedStitch] = []
+        let metadataFiles = try fileManager.contentsOfDirectory(
+            at: metadataDirectoryURL,
             includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         )
-
-        let decoder = JSONDecoder()
-        var stitches: [CompletedStitch] = []
-        for url in urls where url.pathExtension == "json" {
+        for url in metadataFiles where url.pathExtension == "json" {
             guard
                 let data = try? Data(contentsOf: url),
                 let record = try? decoder.decode(HistoryRecord.self, from: data),
-                let thumbnail = loadImage(
-                    at: directoryURL.appendingPathComponent(record.thumbnailFilename)
-                )
+                let thumbnail = loadImage(at: thumbnailURL(for: record.id))
             else {
                 continue
             }
 
-            let fullResolutionURL = record.fullResolutionFilename.map {
-                directoryURL.appendingPathComponent($0)
-            }.flatMap { fileManager.fileExists(atPath: $0.path) ? $0 : nil }
+            let fullResolutionURL: URL?
+            if record.fullResolutionFilename != nil {
+                let candidateURL = self.fullResolutionURL(for: record.id)
+                fullResolutionURL = fileManager.fileExists(atPath: candidateURL.path) ? candidateURL : nil
+            } else {
+                fullResolutionURL = nil
+            }
             var stitch = CompletedStitch(
                 id: record.id,
                 thumbnail: thumbnail,
@@ -261,39 +367,64 @@ struct HistoryImageStore: @unchecked Sendable {
 
     /// Ensures an iCloud-backed asset has been downloaded before an exporter
     /// reads or transfers it. Local history files are immediately ready.
-    func prepareForExport(_ url: URL) async throws {
+    func prepareForExport(
+        _ url: URL,
+        progress: @escaping @Sendable (HistoryAssetPreparationProgress) async -> Void = { _ in }
+    ) async throws {
+        await progress(HistoryAssetPreparationProgress(phase: .checking, fraction: nil))
         guard location == .iCloudDrive else {
+            await progress(HistoryAssetPreparationProgress(phase: .ready, fraction: 1))
             return
         }
         guard fileManager.fileExists(atPath: url.path) else {
             throw CocoaError(.fileNoSuchFile)
         }
 
+        var monitoredURL = url
+        monitoredURL.removeAllCachedResourceValues()
+        if let values = try? monitoredURL.resourceValues(forKeys: [
+            .isUbiquitousItemKey,
+            .ubiquitousItemDownloadingStatusKey
+        ]) {
+            if values.isUbiquitousItem == false || values.ubiquitousItemDownloadingStatus == .current {
+                await progress(HistoryAssetPreparationProgress(phase: .ready, fraction: 1))
+                return
+            }
+        }
+
+        await progress(HistoryAssetPreparationProgress(phase: .requestingDownload, fraction: nil))
         do {
             try fileManager.startDownloadingUbiquitousItem(at: url)
         } catch {
             throw HistoryImageStoreError.exportDownloadFailed(error.localizedDescription)
         }
 
-        for _ in 0..<60 {
+        // Large, tall PNGs can take longer than a minute on a constrained
+        // connection. Keep the operation cancellable while allowing five
+        // minutes before presenting a retryable timeout.
+        for _ in 0..<600 {
             try Task.checkCancellation()
             do {
-                let values = try url.resourceValues(forKeys: [
+                monitoredURL.removeAllCachedResourceValues()
+                let values = try monitoredURL.resourceValues(forKeys: [
                     .ubiquitousItemDownloadingStatusKey,
-                    .ubiquitousItemDownloadingErrorKey
+                    .ubiquitousItemDownloadingErrorKey,
+                    .ubiquitousItemIsDownloadingKey
                 ])
                 if let error = values.ubiquitousItemDownloadingError {
                     throw HistoryImageStoreError.exportDownloadFailed(error.localizedDescription)
                 }
                 if values.ubiquitousItemDownloadingStatus == .current {
+                    await progress(HistoryAssetPreparationProgress(phase: .ready, fraction: 1))
                     return
                 }
+                await progress(HistoryAssetPreparationProgress(phase: .downloading, fraction: nil))
             } catch let error as HistoryImageStoreError {
                 throw error
             } catch {
                 throw HistoryImageStoreError.exportDownloadFailed(error.localizedDescription)
             }
-            try await Task.sleep(for: .seconds(1))
+            try await Task.sleep(for: .milliseconds(500))
         }
 
         throw HistoryImageStoreError.exportDownloadTimedOut
@@ -302,6 +433,12 @@ struct HistoryImageStore: @unchecked Sendable {
     private func createDirectory() throws {
         do {
             try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            for folder in ["Images", "Thumbnails", "Metadata"] {
+                try fileManager.createDirectory(
+                    at: directoryURL.appendingPathComponent(folder, isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+            }
         } catch {
             throw HistoryImageStoreError.directoryCreationFailed(error.localizedDescription)
         }
@@ -318,7 +455,8 @@ struct HistoryImageStore: @unchecked Sendable {
     }
 
     private func writePNG(_ image: CGImage, to destinationURL: URL) throws {
-        let temporaryURL = directoryURL
+        let temporaryURL = destinationURL
+            .deletingLastPathComponent()
             .appendingPathComponent(".\(destinationURL.lastPathComponent).\(UUID().uuidString)")
         defer { try? fileManager.removeItem(at: temporaryURL) }
 
@@ -349,11 +487,33 @@ struct HistoryImageStore: @unchecked Sendable {
             includingPropertiesForKeys: [.creationDateKey],
             options: [.skipsHiddenFiles]
         )
+
+        for url in urls where url.pathExtension == "json" {
+            let idString = url.deletingPathExtension().lastPathComponent
+            guard let id = UUID(uuidString: idString) else { continue }
+            let destination = metadataURL(for: id)
+            if !fileManager.fileExists(atPath: destination.path) {
+                try fileManager.moveItem(at: url, to: destination)
+            }
+        }
+
+        for url in urls where url.pathExtension == "png" && url.lastPathComponent.hasSuffix(".thumbnail.png") {
+            let idString = url
+                .deletingPathExtension()
+                .deletingPathExtension()
+                .lastPathComponent
+            guard let id = UUID(uuidString: idString) else { continue }
+            let destination = thumbnailURL(for: id)
+            if !fileManager.fileExists(atPath: destination.path) {
+                try fileManager.moveItem(at: url, to: destination)
+            }
+        }
+
+        let decoder = JSONDecoder()
         for url in urls where url.pathExtension == "png" && !url.lastPathComponent.hasSuffix(".thumbnail.png") {
             let idString = url.deletingPathExtension().lastPathComponent
             guard
                 let id = UUID(uuidString: idString),
-                !fileManager.fileExists(atPath: metadataURL(for: id).path),
                 let source = CGImageSourceCreateWithURL(url as CFURL, nil),
                 let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
                 let width = properties[kCGImagePropertyPixelWidth] as? Int,
@@ -365,32 +525,105 @@ struct HistoryImageStore: @unchecked Sendable {
             else {
                 continue
             }
-            let thumbnailURL = thumbnailURL(for: id)
-            try writePNG(thumbnail, to: thumbnailURL)
             let values = try? url.resourceValues(forKeys: [.creationDateKey])
+            let fullResolutionDestination = fullResolutionURL(for: id)
+            if !fileManager.fileExists(atPath: fullResolutionDestination.path) {
+                try fileManager.moveItem(at: url, to: fullResolutionDestination)
+            }
+
+            let thumbnailDestination = thumbnailURL(for: id)
+            if !fileManager.fileExists(atPath: thumbnailDestination.path) {
+                try writePNG(thumbnail, to: thumbnailDestination)
+            }
+
+            let existingRecord: HistoryRecord?
+            if let data = try? Data(contentsOf: metadataURL(for: id)) {
+                existingRecord = try? decoder.decode(HistoryRecord.self, from: data)
+            } else {
+                existingRecord = nil
+            }
             try writeRecord(HistoryRecord(
                 id: id,
-                pixelSize: PixelSize(width: width, height: height),
-                savedAt: values?.creationDate ?? Date(),
-                sources: [],
-                sourceImagesDeleted: false,
-                sourceDeletionError: nil,
-                fullResolutionFilename: url.lastPathComponent,
-                thumbnailFilename: thumbnailURL.lastPathComponent
+                pixelSize: existingRecord?.pixelSize ?? PixelSize(width: width, height: height),
+                savedAt: existingRecord?.savedAt ?? values?.creationDate ?? Date(),
+                sources: existingRecord?.sources ?? [],
+                sourceImagesDeleted: existingRecord?.sourceImagesDeleted ?? false,
+                sourceDeletionError: existingRecord?.sourceDeletionError,
+                fullResolutionFilename: fullResolutionDestination.lastPathComponent,
+                thumbnailFilename: thumbnailDestination.lastPathComponent
             ))
         }
     }
 
     private func fullResolutionURL(for id: UUID) -> URL {
-        directoryURL.appendingPathComponent(id.uuidString).appendingPathExtension("png")
+        imagesDirectoryURL
+            .appendingPathComponent(id.uuidString)
+            .appendingPathExtension("png")
     }
 
     private func thumbnailURL(for id: UUID) -> URL {
-        directoryURL.appendingPathComponent("\(id.uuidString).thumbnail.png")
+        thumbnailsDirectoryURL
+            .appendingPathComponent("\(id.uuidString).thumbnail.png")
     }
 
     private func metadataURL(for id: UUID) -> URL {
-        directoryURL.appendingPathComponent(id.uuidString).appendingPathExtension("json")
+        metadataDirectoryURL
+            .appendingPathComponent(id.uuidString)
+            .appendingPathExtension("json")
+    }
+
+    private var imagesDirectoryURL: URL {
+        directoryURL.appendingPathComponent("Images", isDirectory: true)
+    }
+
+    private var thumbnailsDirectoryURL: URL {
+        directoryURL.appendingPathComponent("Thumbnails", isDirectory: true)
+    }
+
+    private var metadataDirectoryURL: URL {
+        directoryURL.appendingPathComponent("Metadata", isDirectory: true)
+    }
+
+    private func storedFiles() throws -> [URL] {
+        guard fileManager.fileExists(atPath: directoryURL.path) else {
+            return []
+        }
+
+        let enumerator = fileManager.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        var files: [URL] = []
+        while let url = enumerator?.nextObject() as? URL {
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+            if values?.isDirectory != true {
+                files.append(url)
+            }
+        }
+        return files
+    }
+
+    private func migrationURL(for file: URL, relativeTo sourceRoot: URL) -> URL {
+        let relativePath = file.path.replacingOccurrences(
+            of: sourceRoot.path + "/",
+            with: ""
+        )
+        let components = relativePath.split(separator: "/")
+        if components.count > 1 {
+            return directoryURL.appendingPathComponent(relativePath)
+        }
+
+        switch file.pathExtension.lowercased() {
+        case "json":
+            return metadataDirectoryURL.appendingPathComponent(file.lastPathComponent)
+        case "png" where file.lastPathComponent.hasSuffix(".thumbnail.png"):
+            return thumbnailsDirectoryURL.appendingPathComponent(file.lastPathComponent)
+        case "png":
+            return imagesDirectoryURL.appendingPathComponent(file.lastPathComponent)
+        default:
+            return directoryURL.appendingPathComponent(file.lastPathComponent)
+        }
     }
 
     private func loadImage(at url: URL) -> CGImage? {

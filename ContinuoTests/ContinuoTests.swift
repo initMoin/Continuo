@@ -28,6 +28,53 @@ final class ContinuoTests: XCTestCase {
         XCTAssertGreaterThan(normalized.matchingRepresentation.edgeMagnitude.max() ?? 0, 0)
     }
 
+    func testBackgroundNormalizationBoundsMatchingPixelsAndKeepsOutputSize() throws {
+        let image = try XCTUnwrap(makeTestImage(
+            width: 80,
+            rows: (0..<160).map { Float($0) / 160.0 }
+        ))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-matching-normalization-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writePNG(image, to: url)
+
+        let normalizer = ImageNormalizer(
+            configuration: ImageNormalizationConfiguration(matchingMaximumPixelSize: 64)
+        )
+        let normalized = try normalizer.normalizeForMatching(
+            SourceImage(localURL: url, filename: "fixture.png")
+        )
+
+        XCTAssertEqual(normalized.workingPixelSize, PixelSize(width: 80, height: 160))
+        XCTAssertLessThanOrEqual(max(normalized.image.width, normalized.image.height), 64)
+        XCTAssertEqual(normalized.image.width, normalized.matchingImage.width)
+        XCTAssertEqual(normalized.image.height, normalized.matchingImage.height)
+        XCTAssertEqual(
+            normalized.matchingRepresentation.grayscale.count,
+            normalized.matchingImage.width * normalized.matchingImage.height
+        )
+    }
+
+    func testDisplayThumbnailBoundsPixelsWithoutBuildingAStitchPreview() throws {
+        let image = try XCTUnwrap(makeTestImage(
+            width: 80,
+            rows: (0..<160).map { Float($0) / 160.0 }
+        ))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-display-thumbnail-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try writePNG(image, to: url)
+
+        let thumbnail = try ImageNormalizer().makeThumbnail(
+            SourceImage(localURL: url, filename: "fixture.png"),
+            maximumPixelSize: 40
+        )
+
+        XCTAssertLessThanOrEqual(max(thumbnail.width, thumbnail.height), 40)
+        XCTAssertEqual(thumbnail.width, 20)
+        XCTAssertEqual(thumbnail.height, 40)
+    }
+
     func testFileImporterPreservesSelectionOrder() throws {
         let firstURL = FileManager.default.temporaryDirectory.appendingPathComponent("continuo-order-first-(UUID().uuidString).png")
         let secondURL = FileManager.default.temporaryDirectory.appendingPathComponent("continuo-order-second-(UUID().uuidString).png")
@@ -108,6 +155,84 @@ final class ContinuoTests: XCTestCase {
 
         XCTAssertEqual(selection?.sources.map(\.filename), ["top", "middle", "bottom"])
         XCTAssertEqual(selection?.joinCount, 2)
+    }
+
+    func testAutomaticScreenshotSessionSelectorUsesNewestBoundedCompatibleSession() {
+        let configuration = AutomaticScreenshotSelectionConfiguration(
+            maximumCandidateCount: 3,
+            metadataFetchLimit: 20,
+            maximumTemporalGap: 60,
+            maximumSessionDuration: 180,
+            maximumRecentAge: 3_600
+        )
+        let selector = AutomaticScreenshotSessionSelector(configuration: configuration)
+        let baseDate = Date(timeIntervalSince1970: 10_000)
+        let phoneSize = PixelSize(width: 430, height: 932)
+        let tabletSize = PixelSize(width: 2_048, height: 2_732)
+        let candidates = [
+            AutomaticScreenshotCandidate(
+                identifier: "old-1",
+                captureDate: baseDate,
+                pixelSize: phoneSize
+            ),
+            AutomaticScreenshotCandidate(
+                identifier: "old-2",
+                captureDate: baseDate.addingTimeInterval(20),
+                pixelSize: phoneSize
+            ),
+            AutomaticScreenshotCandidate(
+                identifier: "recent-1",
+                captureDate: baseDate.addingTimeInterval(600),
+                pixelSize: phoneSize
+            ),
+            AutomaticScreenshotCandidate(
+                identifier: "recent-2",
+                captureDate: baseDate.addingTimeInterval(620),
+                pixelSize: phoneSize
+            ),
+            AutomaticScreenshotCandidate(
+                identifier: "recent-3",
+                captureDate: baseDate.addingTimeInterval(640),
+                pixelSize: phoneSize
+            ),
+            AutomaticScreenshotCandidate(
+                identifier: "recent-4",
+                captureDate: baseDate.addingTimeInterval(660),
+                pixelSize: phoneSize
+            ),
+            AutomaticScreenshotCandidate(
+                identifier: "newest-isolated",
+                captureDate: baseDate.addingTimeInterval(900),
+                pixelSize: tabletSize
+            )
+        ]
+
+        let selected = selector.newestEligibleSession(from: candidates)
+
+        XCTAssertEqual(selected.map(\.identifier), ["recent-2", "recent-3", "recent-4"])
+    }
+
+    func testAutomaticScreenshotSessionSelectorDoesNotChainPastSessionDuration() {
+        let configuration = AutomaticScreenshotSelectionConfiguration(
+            maximumCandidateCount: 12,
+            metadataFetchLimit: 20,
+            maximumTemporalGap: 60,
+            maximumSessionDuration: 100,
+            maximumRecentAge: 3_600
+        )
+        let selector = AutomaticScreenshotSessionSelector(configuration: configuration)
+        let baseDate = Date(timeIntervalSince1970: 20_000)
+        let candidates = (0..<4).map { index in
+            AutomaticScreenshotCandidate(
+                identifier: "candidate-\(index)",
+                captureDate: baseDate.addingTimeInterval(Double(index * 50)),
+                pixelSize: PixelSize(width: 430, height: 932)
+            )
+        }
+
+        let selected = selector.newestEligibleSession(from: candidates)
+
+        XCTAssertEqual(selected.map(\.identifier), ["candidate-1", "candidate-2", "candidate-3"])
     }
 
     func testPixelRegionCropperPreservesExactPixelWindow() throws {
@@ -208,6 +333,75 @@ final class ContinuoTests: XCTestCase {
         XCTAssertNil(result.diagnostics.failureReason, "diagnostics=\(result.diagnostics)")
         XCTAssertGreaterThan(result.diagnostics.candidateCount, 0)
         XCTAssertGreaterThan(result.diagnostics.elapsedMilliseconds, 0)
+    }
+
+    func testRegistrationConvertsBoundedMatchingTranslationToOutputPixels() async throws {
+        let width = 16
+        let firstRows = variedRows(start: 0, count: 100)
+        let secondRows = variedRows(start: 40, count: 100)
+        let firstImage = try XCTUnwrap(makeTestImage(width: width, rows: firstRows))
+        let secondImage = try XCTUnwrap(makeTestImage(width: width, rows: secondRows))
+        let outputSize = PixelSize(width: width * 2, height: 200)
+        let first = makeNormalizedImage(
+            id: UUID(),
+            image: firstImage,
+            rows: firstRows,
+            workingPixelSize: outputSize
+        )
+        let second = makeNormalizedImage(
+            id: UUID(),
+            image: secondImage,
+            rows: secondRows,
+            workingPixelSize: outputSize
+        )
+
+        let result = try await PairwiseRegistrar().register(from: first, to: second)
+
+        XCTAssertTrue(result.confidence.isAccepted, "diagnostics=\(result.diagnostics)")
+        XCTAssertLessThanOrEqual(abs(result.transform.ty - 80), 4)
+        XCTAssertEqual(result.diagnostics.translation.x, result.transform.tx)
+        XCTAssertEqual(result.diagnostics.translation.y, result.transform.ty)
+    }
+
+    func testPrecomputedMappingReusesUnchangedDirectedJoin() async throws {
+        let width = 16
+        let firstRows = variedRows(start: 0, count: 100)
+        let secondRows = variedRows(start: 40, count: 100)
+        let thirdRows = variedRows(start: 80, count: 100)
+        let images = try [firstRows, secondRows, thirdRows].map { rows in
+            try XCTUnwrap(makeTestImage(width: width, rows: rows))
+        }
+        let urls = images.indices.map { index in
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuo-reused-join-\(index)-\(UUID().uuidString).png")
+        }
+        defer {
+            for url in urls {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        for (image, url) in zip(images, urls) {
+            try writePNG(image, to: url)
+        }
+
+        let sources = urls.map { SourceImage(localURL: $0, filename: $0.lastPathComponent) }
+        let reused = makeAcceptedJoin(
+            from: sources[0].id,
+            to: sources[1].id,
+            translation: Point2D(x: 0, y: 40),
+            overlapWidth: width,
+            overlapHeight: 60
+        )
+
+        let joins = try await StitchEngine().precomputeJoins(
+            for: sources,
+            reusing: [reused]
+        )
+
+        XCTAssertEqual(joins.count, 2)
+        XCTAssertEqual(joins[0].id, reused.id)
+        XCTAssertEqual(joins[1].fromSourceID, sources[1].id)
+        XCTAssertEqual(joins[1].toSourceID, sources[2].id)
     }
 
     func testJoinDiagnosticsDecodesLegacyPayloadWithoutTiming() throws {
@@ -553,6 +747,30 @@ final class ContinuoTests: XCTestCase {
         ])
     }
 
+    func testPixelCompositorRequestsFullResolutionSourcesOnDemandInOrder() throws {
+        let images = [
+            try XCTUnwrap(makeExactRowImage([0.10, 0.20, 0.30, 0.40])),
+            try XCTUnwrap(makeExactRowImage([0.30, 0.40, 0.50, 0.60]))
+        ]
+        var requestedIndices: [Int] = []
+
+        let output = try PixelCompositor().compose(
+            imageCount: images.count,
+            frames: [
+                Rect2D(x: 0, y: 0, width: 1, height: 4),
+                Rect2D(x: 0, y: 2, width: 1, height: 4)
+            ],
+            seamPositions: [0, 1],
+            imageProvider: { index in
+                requestedIndices.append(index)
+                return images[index]
+            }
+        )
+
+        XCTAssertEqual(requestedIndices, [0, 1])
+        XCTAssertEqual(output.height, 6)
+    }
+
     func testPixelCompositorLeavesIdenticalOverlapByteForByteUnchanged() throws {
         let firstValues: [[Float]] = [
             [0.10],
@@ -848,13 +1066,32 @@ final class ContinuoTests: XCTestCase {
 
         let image = try XCTUnwrap(makeTestImage(width: 12, rows: Array(repeating: 0.4, count: 2_400)))
         let store = HistoryImageStore(directoryURL: rootURL)
+        let stitchID = UUID()
         let asset = try store.archive(
             image: image,
             pixelSize: PixelSize(width: image.width, height: image.height),
-            id: UUID()
+            id: stitchID
         )
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        XCTAssertTrue(asset.fullResolutionURL.path.contains("/Images/"))
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: rootURL
+                    .appendingPathComponent("Thumbnails", isDirectory: true)
+                    .appendingPathComponent("\(stitchID.uuidString).thumbnail.png")
+                    .path
+            )
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: rootURL
+                    .appendingPathComponent("Metadata", isDirectory: true)
+                    .appendingPathComponent(stitchID.uuidString)
+                    .appendingPathExtension("json")
+                    .path
+            )
+        )
         XCTAssertEqual(asset.pixelSize, PixelSize(width: image.width, height: image.height))
         XCTAssertLessThanOrEqual(max(asset.thumbnail.width, asset.thumbnail.height), 1_600)
         XCTAssertEqual(asset.fullResolutionURL.pathExtension, "png")
@@ -870,7 +1107,7 @@ final class ContinuoTests: XCTestCase {
         consumedStitch.fullResolutionURL = nil
         try store.update(consumedStitch)
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
         let reloaded = try store.load()
         XCTAssertEqual(reloaded.count, 1)
         XCTAssertNil(reloaded[0].fullResolutionURL)
@@ -896,13 +1133,71 @@ final class ContinuoTests: XCTestCase {
             id: UUID()
         )
 
-        try sourceStore.migrateHistory(to: destinationStore)
-        XCTAssertEqual(try destinationStore.load().count, 1)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        let progress = LockedValues<HistoryTransferProgress>()
+        let result = try sourceStore.migrateHistory(to: destinationStore) {
+            progress.append($0)
+        }
+        let progressValues = progress.values
+        let loadedDestination = try destinationStore.load()
+        XCTAssertEqual(loadedDestination.count, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        XCTAssertTrue(loadedDestination[0].fullResolutionURL?.path.contains("/Images/") == true)
+        XCTAssertEqual(result.copiedFileCount, 3)
+        XCTAssertTrue(progressValues.contains { $0.phase == .preparing })
+        XCTAssertTrue(progressValues.contains { $0.phase == .copying && $0.completed == 3 })
 
         try sourceStore.removeStoredFiles()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
         XCTAssertTrue(try sourceStore.load().isEmpty)
         XCTAssertEqual(try destinationStore.load().count, 1)
+    }
+
+    func testHistoryImageStoreMigratesLegacyFlatFilesIntoSeparateFolders() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-legacy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let image = try XCTUnwrap(makeTestImage(width: 8, rows: [0.1, 0.3, 0.6, 0.9]))
+        let store = HistoryImageStore(directoryURL: rootURL)
+        let stitchID = UUID()
+        let asset = try store.archive(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            id: stitchID
+        )
+
+        let legacyFiles = [
+            asset.fullResolutionURL,
+            rootURL.appendingPathComponent("Thumbnails", isDirectory: true)
+                .appendingPathComponent("\(stitchID.uuidString).thumbnail.png"),
+            rootURL.appendingPathComponent("Metadata", isDirectory: true)
+                .appendingPathComponent(stitchID.uuidString)
+                .appendingPathExtension("json")
+        ]
+        for file in legacyFiles {
+            try FileManager.default.moveItem(at: file, to: rootURL.appendingPathComponent(file.lastPathComponent))
+        }
+
+        let loaded = try store.load()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertTrue(loaded[0].fullResolutionURL?.path.contains("/Images/") == true)
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: rootURL
+                    .appendingPathComponent("Thumbnails", isDirectory: true)
+                    .appendingPathComponent("\(stitchID.uuidString).thumbnail.png")
+                    .path
+            )
+        )
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: rootURL
+                    .appendingPathComponent("Metadata", isDirectory: true)
+                    .appendingPathComponent(stitchID.uuidString)
+                    .appendingPathExtension("json")
+                    .path
+            )
+        )
     }
 
     func testLocalHistoryAssetIsImmediatelyReadyForExport() async throws {
@@ -1184,14 +1479,26 @@ final class ContinuoTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: originalURL.path))
     }
 
-    private func makeNormalizedImage(id: UUID, image: CGImage, rows: [Float], width: Int = 16) -> NormalizedImage {
+    private func makeNormalizedImage(
+        id: UUID,
+        image: CGImage,
+        rows: [Float],
+        width: Int = 16,
+        workingPixelSize: PixelSize? = nil
+    ) -> NormalizedImage {
         let values = rows.flatMap { row in
             (0..<width).map { column in
                 let columnTexture = Float((column * 37 + 7) % 17) / 16.0 * 0.45
                 return (row * 0.5) + columnTexture
             }
         }
-        return makeNormalizedImage(id: id, image: image, values: values, width: width)
+        return makeNormalizedImage(
+            id: id,
+            image: image,
+            values: values,
+            width: width,
+            workingPixelSize: workingPixelSize
+        )
     }
 
     private func makeSequenceSource(_ filename: String, date: Date) -> SourceImage {
@@ -1207,7 +1514,13 @@ final class ContinuoTests: XCTestCase {
         makeNormalizedImage(id: id, image: image, values: values.flatMap { $0 }, width: values.first?.count ?? 0)
     }
 
-    private func makeNormalizedImage(id: UUID, image: CGImage, values: [Float], width: Int) -> NormalizedImage {
+    private func makeNormalizedImage(
+        id: UUID,
+        image: CGImage,
+        values: [Float],
+        width: Int,
+        workingPixelSize: PixelSize? = nil
+    ) -> NormalizedImage {
         let height = max(1, values.count / max(1, width))
         let mean = values.reduce(0, +) / Float(max(1, values.count))
         let centered = values.map { $0 - mean }
@@ -1216,8 +1529,8 @@ final class ContinuoTests: XCTestCase {
             source: source,
             image: image,
             matchingRepresentation: MatchingRepresentation(width: width, height: height, grayscale: centered),
-            originalPixelSize: PixelSize(width: width, height: height),
-            workingPixelSize: PixelSize(width: width, height: height)
+            originalPixelSize: workingPixelSize ?? PixelSize(width: width, height: height),
+            workingPixelSize: workingPixelSize ?? PixelSize(width: width, height: height)
         )
     }
 
@@ -1429,6 +1742,23 @@ final class ContinuoTests: XCTestCase {
         }
     }
 
+}
+
+private final class LockedValues<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Value] = []
+
+    func append(_ value: Value) {
+        lock.lock()
+        storage.append(value)
+        lock.unlock()
+    }
+
+    var values: [Value] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
 }
 
 private extension Double {

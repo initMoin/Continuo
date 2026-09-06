@@ -14,8 +14,28 @@ public struct PreviewRenderer: Sendable {
     }
 
     public func render(sources: [NormalizedImage], joins: [JoinResult]) throws -> StitchPreview {
+        try render(
+            sources: sources,
+            joins: joins,
+            imageProvider: { sources[$0].image }
+        )
+    }
+
+    /// Calculates layout and seams from compact matching data, then asks for
+    /// each full-resolution source only when the compositor needs it.
+    func render(
+        sources: [NormalizedImage],
+        joins: [JoinResult],
+        imageProvider: (Int) throws -> CGImage
+    ) throws -> StitchPreview {
         try Task.checkCancellation()
         guard !sources.isEmpty else { throw ContinuoError.renderingFailed("There are no normalized sources to render.") }
+
+        var joinsByDestination: [UUID: JoinResult] = [:]
+        joinsByDestination.reserveCapacity(joins.count)
+        for join in joins where joinsByDestination[join.toSourceID] == nil {
+            joinsByDestination[join.toSourceID] = join
+        }
 
         var framesInOrder: [Rect2D] = []
         var current = Rect2D(x: 0, y: 0, width: Double(sources[0].workingPixelSize.width), height: Double(sources[0].workingPixelSize.height))
@@ -23,7 +43,7 @@ public struct PreviewRenderer: Sendable {
 
         for index in 1..<sources.count {
             try Task.checkCancellation()
-            guard let join = joins.first(where: { $0.toSourceID == sources[index].source.id }) else {
+            guard let join = joinsByDestination[sources[index].source.id] else {
                 throw ContinuoError.renderingFailed("The preview is missing a join for source \(sources[index].source.filename ?? sources[index].source.id.uuidString).")
             }
             let sourceSize = sources[index].workingPixelSize
@@ -68,7 +88,7 @@ public struct PreviewRenderer: Sendable {
             try Task.checkCancellation()
             let frame = translatedFrames[index]
 
-            guard joins.first(where: { $0.toSourceID == source.source.id }) != nil else {
+            guard joinsByDestination[source.source.id] != nil else {
                 throw ContinuoError.renderingFailed(
                     "The preview is missing a join for source \(source.source.filename ?? source.source.id.uuidString)."
                 )
@@ -106,9 +126,10 @@ public struct PreviewRenderer: Sendable {
         let image: CGImage
         do {
             image = try pixelCompositor.compose(
-                images: sources.map(\.image),
+                imageCount: sources.count,
                 frames: translatedFrames,
-                seamPositions: seamPositions
+                seamPositions: seamPositions,
+                imageProvider: imageProvider
             )
         } catch let error as PixelCompositingError {
             throw ContinuoError.pixelCompositingFailed(error)
@@ -148,24 +169,43 @@ public struct PreviewRenderer: Sendable {
         var bestY = Double(firstCandidate)
         var bestCost = Double.greatestFiniteMagnitude
 
+        func matchingCoordinate(
+            _ coordinate: Double,
+            sourceExtent: Int,
+            matchingExtent: Int
+        ) -> Int {
+            let scale = Double(max(1, matchingExtent)) / Double(max(1, sourceExtent))
+            return min(
+                matchingExtent - 1,
+                max(0, Int((coordinate * scale).rounded()))
+            )
+        }
+
         func cost(for candidateY: Int) -> Double? {
-            let incomingY = min(incomingRepresentation.height - 1, max(0, candidateY))
-            let previousY = min(
-                previousRepresentation.height - 1,
-                max(0, Int((incomingFrame.y + Double(candidateY) - previousFrame.y).rounded()))
+            let incomingY = matchingCoordinate(
+                Double(candidateY),
+                sourceExtent: incoming.workingPixelSize.height,
+                matchingExtent: incomingRepresentation.height
+            )
+            let previousY = matchingCoordinate(
+                incomingFrame.y + Double(candidateY) - previousFrame.y,
+                sourceExtent: previous.workingPixelSize.height,
+                matchingExtent: previousRepresentation.height
             )
             var disagreement = 0.0
             var detail = 0.0
             var sampleCount = 0
 
             for outputX in stride(from: xStart, through: xEnd, by: xStep) {
-                let previousX = min(
-                    previousRepresentation.width - 1,
-                    max(0, Int((Double(outputX) - previousFrame.x).rounded()))
+                let previousX = matchingCoordinate(
+                    Double(outputX) - previousFrame.x,
+                    sourceExtent: previous.workingPixelSize.width,
+                    matchingExtent: previousRepresentation.width
                 )
-                let incomingX = min(
-                    incomingRepresentation.width - 1,
-                    max(0, Int((Double(outputX) - incomingFrame.x).rounded()))
+                let incomingX = matchingCoordinate(
+                    Double(outputX) - incomingFrame.x,
+                    sourceExtent: incoming.workingPixelSize.width,
+                    matchingExtent: incomingRepresentation.width
                 )
                 let previousValue = previousRepresentation[previousX, previousY]
                 let incomingValue = incomingRepresentation[incomingX, incomingY]

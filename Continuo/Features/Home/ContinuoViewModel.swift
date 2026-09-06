@@ -14,6 +14,16 @@ enum SourceCleanupState: Equatable {
 @MainActor
 @Observable
 final class ContinuoViewModel {
+    private struct PreparedMapping: Sendable {
+        let sourceIDs: [UUID]
+        let joins: [JoinResult]
+    }
+
+    private struct MappingPairKey: Hashable, Sendable {
+        let from: UUID
+        let to: UUID
+    }
+
     enum ProcessingState: Equatable {
         case idle
         case processing(StitchProgress)
@@ -34,6 +44,11 @@ final class ContinuoViewModel {
     var sourceCleanupError: String?
     var preparationStatus: String?
     private(set) var historyStorageLocation: HistoryStorageLocation
+    private(set) var historyTransferProgress: HistoryTransferProgress?
+    private(set) var historyTransferResult: HistoryTransferResult?
+    private(set) var historyTransferError: String?
+    private(set) var historyAssetPreparationID: UUID?
+    private(set) var historyAssetPreparationProgress: HistoryAssetPreparationProgress?
     private(set) var isCurrentPreviewSaved = false
 
     private let photosImporter = PhotosImageImporter()
@@ -43,6 +58,11 @@ final class ContinuoViewModel {
     private var historyImageStore: HistoryImageStore
     private let engine = StitchEngine()
     private var processingTask: Task<Void, Never>?
+    private var mappingPreparationTask: Task<[JoinResult], Error>?
+    private var mappingPreparationObserver: Task<Void, Never>?
+    private var preparedMapping: PreparedMapping?
+    private var preparedJoinsByPair: [MappingPairKey: JoinResult] = [:]
+    private var mappingPreparationSourceIDs: [UUID]?
     private var historyArchiveTask: Task<Void, Never>?
     /// Progress callbacks are delivered through main-actor tasks. This token
     /// prevents a callback from an older stitch from changing the state of a
@@ -76,19 +96,58 @@ final class ContinuoViewModel {
             return nil
         }
 
+        historyTransferProgress = HistoryTransferProgress(
+            phase: .preparing,
+            completed: 0,
+            total: 0,
+            currentFile: nil
+        )
+        historyTransferResult = nil
+        historyTransferError = nil
+
         let currentStore = historyImageStore
         let destinationStore = HistoryImageStore(location: location)
         guard destinationStore.isAvailable else {
+            historyTransferProgress = nil
+            historyTransferError = HistoryImageStoreError.iCloudUnavailable.localizedDescription
             return HistoryImageStoreError.iCloudUnavailable.localizedDescription
         }
 
         do {
-            try await Task.detached(priority: .utility) {
-                try currentStore.migrateHistory(to: destinationStore)
+            let (progressStream, progressContinuation) = AsyncStream<HistoryTransferProgress>
+                .makeStream()
+            let progressTask = Task { @MainActor [weak self] in
+                for await progress in progressStream {
+                    guard let self else { return }
+                    historyTransferProgress = progress
+                }
+            }
+            defer {
+                progressContinuation.finish()
+                progressTask.cancel()
+            }
+            let result = try await Task.detached(
+                priority: .utility
+            ) { [currentStore, destinationStore, progressContinuation] in
+                try currentStore.migrateHistory(to: destinationStore) { progress in
+                    progressContinuation.yield(progress)
+                }
             }.value
+            historyTransferProgress = HistoryTransferProgress(
+                phase: .loading,
+                completed: result.copiedFileCount,
+                total: result.copiedFileCount,
+                currentFile: nil
+            )
             let loaded = try await Task.detached(priority: .utility) {
                 try destinationStore.load()
             }.value
+            historyTransferProgress = HistoryTransferProgress(
+                phase: .cleaning,
+                completed: result.copiedFileCount,
+                total: result.copiedFileCount,
+                currentFile: nil
+            )
             try await Task.detached(priority: .utility) {
                 try currentStore.removeStoredFiles()
             }.value
@@ -96,9 +155,18 @@ final class ContinuoViewModel {
             historyStorageLocation = location
             completedStitches = loaded
             UserDefaults.standard.set(location.rawValue, forKey: Self.historyStoragePreferenceKey)
+            historyTransferProgress = HistoryTransferProgress(
+                phase: .finished,
+                completed: result.copiedFileCount,
+                total: result.copiedFileCount,
+                currentFile: nil
+            )
+            historyTransferResult = result
             logger.info("Moved stitch history to \(location.rawValue, privacy: .public).")
             return nil
         } catch {
+            historyTransferProgress = nil
+            historyTransferError = error.localizedDescription
             logger.error("Could not move stitch history to \(location.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return error.localizedDescription
         }
@@ -106,6 +174,8 @@ final class ContinuoViewModel {
 
     isolated deinit {
         processingTask?.cancel()
+        mappingPreparationTask?.cancel()
+        mappingPreparationObserver?.cancel()
     }
 
     func importPhotos(_ results: [PHPickerResult]) {
@@ -195,7 +265,11 @@ final class ContinuoViewModel {
         }
 
         let importer = automaticScreenshotImporter
-        let builder = AutomaticScreenshotSequenceBuilder()
+        let discoveryRegistrar = PairwiseRegistrar(configuration: RegistrationConfiguration(
+            maximumSeedOffsets: 6,
+            coarseDriftSamples: 13
+        ))
+        let builder = AutomaticScreenshotSequenceBuilder(registrar: discoveryRegistrar)
         processingTask = Task { [weak self] in
             await pendingArchiveTask?.value
             guard let owner = self, !Task.isCancelled else { return }
@@ -333,17 +407,38 @@ final class ContinuoViewModel {
         }
 
         let selectedSources = sources
+        let precomputedJoins = preparedJoins(for: selectedSources)
+        let pendingMappingTask = pendingMappingTask(for: selectedSources)
+        preparedMapping = nil
         let stitchID = UUID()
+        let stitchStartedAt = DispatchTime.now().uptimeNanoseconds
         activeStitchID = stitchID
         state = .processing(StitchProgress(stage: .normalizing, completed: 0, total: selectedSources.count, message: "Preparing screenshots…"))
 
         processingTask = Task { [weak self] in
             do {
                 guard let self else { return }
-                let result = try await runStitching(sources: selectedSources, stitchID: stitchID)
+                let joinsToReuse: [JoinResult]?
+                if let precomputedJoins {
+                    joinsToReuse = precomputedJoins
+                } else if let pendingMappingTask {
+                    joinsToReuse = try? await pendingMappingTask.value
+                } else {
+                    joinsToReuse = nil
+                }
+                let result = try await runStitching(
+                    sources: selectedSources,
+                    precomputedJoins: joinsToReuse,
+                    stitchID: stitchID
+                )
                 guard !Task.isCancelled, activeStitchID == stitchID else { return }
-                let registrationMilliseconds = result.joins.reduce(0) { $0 + $1.diagnostics.elapsedMilliseconds }
-                logger.info("Manual stitch completed successfully. Preview rendered at \(result.pixelSize.width)x\(result.pixelSize.height) pixels with \(result.joins.count) join(s); registration_ms=\(registrationMilliseconds, privacy: .public).")
+                let registrationSumMilliseconds = result.joins.reduce(0) {
+                    $0 + $1.diagnostics.elapsedMilliseconds
+                }
+                let stitchWallMilliseconds = Double(
+                    DispatchTime.now().uptimeNanoseconds &- stitchStartedAt
+                ) / 1_000_000
+                logger.info("Manual stitch completed successfully. Preview rendered at \(result.pixelSize.width)x\(result.pixelSize.height) pixels with \(result.joins.count) join(s); stitch_wall_ms=\(stitchWallMilliseconds, privacy: .public) registration_sum_ms=\(registrationSumMilliseconds, privacy: .public).")
                 activeStitchID = nil
                 preview = result
                 isCurrentPreviewSaved = false
@@ -437,6 +532,7 @@ final class ContinuoViewModel {
         let activeSources = sources
         processingTask?.cancel()
         processingTask = nil
+        invalidatePreparedMapping(clearPairCache: true)
         activeStitchID = nil
         sources.removeAll()
         removeTemporaryWorkingCopies(activeSources)
@@ -516,8 +612,30 @@ final class ContinuoViewModel {
         else {
             throw CocoaError(.fileNoSuchFile)
         }
-        try await historyImageStore.prepareForExport(url)
-        return url
+        historyAssetPreparationID = id
+        historyAssetPreparationProgress = HistoryAssetPreparationProgress(
+            phase: .checking,
+            fraction: nil
+        )
+
+        do {
+            try await historyImageStore.prepareForExport(url) { [weak self] progress in
+                await MainActor.run {
+                    guard self?.historyAssetPreparationID == id else { return }
+                    self?.historyAssetPreparationProgress = progress
+                }
+            }
+            return url
+        } catch {
+            clearHistoryAssetPreparation(id: id)
+            throw error
+        }
+    }
+
+    func clearHistoryAssetPreparation(id: UUID) {
+        guard historyAssetPreparationID == id else { return }
+        historyAssetPreparationID = nil
+        historyAssetPreparationProgress = nil
     }
 
     func consumeHistoryAsset(id: UUID) {
@@ -622,7 +740,11 @@ final class ContinuoViewModel {
         }
     }
 
-    private func runStitching(sources selectedSources: [SourceImage], stitchID: UUID) async throws -> StitchPreview {
+    private func runStitching(
+        sources selectedSources: [SourceImage],
+        precomputedJoins: [JoinResult]?,
+        stitchID: UUID
+    ) async throws -> StitchPreview {
         let engine = engine
         let progressHandler: @Sendable (StitchProgress) -> Void = { [weak self] progress in
             Task { @MainActor [weak self] in
@@ -632,13 +754,110 @@ final class ContinuoViewModel {
             }
         }
         let worker = Task.detached(priority: .userInitiated) {
-            try await engine.stitch(sources: selectedSources, progress: progressHandler)
+            try await engine.stitch(
+                sources: selectedSources,
+                precomputedJoins: precomputedJoins,
+                progress: progressHandler
+            )
         }
         return try await withTaskCancellationHandler {
             try await worker.value
         } onCancel: {
             worker.cancel()
         }
+    }
+
+    private func scheduleMappingPreparation() {
+        invalidatePreparedMapping()
+        let candidates = sources.filter { !$0.excluded }
+        let currentSourceIDs = Set(candidates.map(\.id))
+        preparedJoinsByPair = preparedJoinsByPair.filter {
+            currentSourceIDs.contains($0.key.from) && currentSourceIDs.contains($0.key.to)
+        }
+        guard candidates.count >= 2 else { return }
+
+        let sourceIDs = candidates.map(\.id)
+        let reusableJoins = candidates.indices.dropLast().compactMap { index in
+            preparedJoinsByPair[MappingPairKey(
+                from: candidates[index].id,
+                to: candidates[index + 1].id
+            )]
+        }
+        let engine = engine
+        let task = Task.detached(priority: .utility) {
+            try await engine.precomputeJoins(
+                for: candidates,
+                reusing: reusableJoins
+            )
+        }
+        mappingPreparationTask = task
+        mappingPreparationSourceIDs = sourceIDs
+        mappingPreparationObserver = Task { [weak self] in
+            do {
+                let joins = try await task.value
+
+                guard
+                    let self,
+                    mappingPreparationSourceIDs == sourceIDs,
+                    self.mappingSourceIDs(for: self.sources) == sourceIDs
+                else {
+                    return
+                }
+                preparedMapping = PreparedMapping(sourceIDs: sourceIDs, joins: joins)
+                for join in joins {
+                    preparedJoinsByPair[MappingPairKey(
+                        from: join.fromSourceID,
+                        to: join.toSourceID
+                    )] = join
+                }
+                mappingPreparationTask = nil
+                mappingPreparationObserver = nil
+                mappingPreparationSourceIDs = nil
+                logger.info(
+                    "Prepared \(joins.count) background screenshot mapping join(s) for the current selection."
+                )
+            } catch is CancellationError {
+                // Source edits cancel preparation and start a new task.
+            } catch {
+                guard let self else { return }
+                guard mappingPreparationSourceIDs == sourceIDs else { return }
+                mappingPreparationTask = nil
+                mappingPreparationObserver = nil
+                mappingPreparationSourceIDs = nil
+                logger.debug(
+                    "Background screenshot mapping was not retained: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
+    private func invalidatePreparedMapping(clearPairCache: Bool = false) {
+        mappingPreparationTask?.cancel()
+        mappingPreparationObserver?.cancel()
+        mappingPreparationTask = nil
+        mappingPreparationObserver = nil
+        mappingPreparationSourceIDs = nil
+        preparedMapping = nil
+        if clearPairCache {
+            preparedJoinsByPair.removeAll(keepingCapacity: false)
+        }
+    }
+
+    private func preparedJoins(for sources: [SourceImage]) -> [JoinResult]? {
+        let sourceIDs = mappingSourceIDs(for: sources)
+        guard preparedMapping?.sourceIDs == sourceIDs else { return nil }
+        return preparedMapping?.joins
+    }
+
+    private func pendingMappingTask(for sources: [SourceImage]) -> Task<[JoinResult], Error>? {
+        guard mappingPreparationSourceIDs == mappingSourceIDs(for: sources) else {
+            return nil
+        }
+        return mappingPreparationTask
+    }
+
+    private func mappingSourceIDs(for sources: [SourceImage]) -> [UUID] {
+        sources.filter { !$0.excluded }.map(\.id)
     }
 
     private func resetResult(cancelCurrentTask: Bool = true) {
@@ -656,6 +875,7 @@ final class ContinuoViewModel {
         sourceCleanupError = nil
         preparationStatus = nil
         state = sources.isEmpty ? .idle : .idle
+        scheduleMappingPreparation()
     }
 
     private func showError(_ error: Error) {

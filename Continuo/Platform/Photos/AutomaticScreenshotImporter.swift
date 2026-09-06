@@ -45,7 +45,12 @@ public struct AutomaticScreenshotImporter {
                     message: "Fetching screenshot \(index + 1) of \(assets.count)…"
                 ))
 
-                let thumbnailData = try await loadCandidateThumbnail(asset)
+                let thumbnailData = try await loadCandidateThumbnail(
+                    asset,
+                    index: index,
+                    total: assets.count,
+                    progress: progress
+                )
                 let filename = resourceFilename(for: asset) ?? "Screenshot-\(index + 1).png"
                 let localURL = destination
                     .appendingPathComponent("Auto-\(UUID().uuidString)")
@@ -147,39 +152,37 @@ public struct AutomaticScreenshotImporter {
     }
 
     private func fetchScreenshotAssets() -> [PHAsset] {
+        let cutoffDate = Date().addingTimeInterval(-configuration.maximumRecentAge)
         var assets = collectAssets(
             with: NSPredicate(
-                format: "mediaType == %d AND mediaSubtype == %d",
+                format: "mediaType == %d AND (mediaSubtype & %d) != 0 AND creationDate >= %@",
                 PHAssetMediaType.image.rawValue,
-                PHAssetMediaSubtype.photoScreenshot.rawValue
-            )
+                PHAssetMediaSubtype.photoScreenshot.rawValue,
+                cutoffDate as NSDate
+            ),
+            limit: configuration.metadataFetchLimit
         )
 
         // Some Photos libraries expose screenshot files without the
         // photoScreenshot subtype. Only broaden the query when the typed
         // query cannot provide a complete candidate set, then keep assets
         // whose original resource name still identifies them as screenshots.
-        if assets.count < configuration.minimumSequenceLength {
+        if selectRecentSession(from: assets).count < configuration.minimumSequenceLength {
             let knownIdentifiers = Set(assets.map(\.localIdentifier))
             let fallbackAssets = collectAssets(
-                with: NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue),
-                limit: max(configuration.maximumCandidateCount * 8, 100)
+                with: NSPredicate(
+                    format: "mediaType == %d AND creationDate >= %@",
+                    PHAssetMediaType.image.rawValue,
+                    cutoffDate as NSDate
+                ),
+                limit: configuration.metadataFetchLimit
             )
             assets.append(contentsOf: fallbackAssets.filter {
                 !knownIdentifiers.contains($0.localIdentifier) && isLikelyScreenshot($0)
             })
         }
 
-        return assets
-            .prefix(configuration.maximumCandidateCount)
-            .sorted {
-            switch ($0.creationDate, $1.creationDate) {
-            case let (left?, right?) where left != right:
-                return left < right
-            default:
-                return $0.localIdentifier < $1.localIdentifier
-            }
-        }
+        return selectRecentSession(from: assets)
     }
 
     private func collectAssets(with predicate: NSPredicate, limit: Int? = nil) -> [PHAsset] {
@@ -187,7 +190,7 @@ public struct AutomaticScreenshotImporter {
         options.sortDescriptors = [
             NSSortDescriptor(key: "creationDate", ascending: false)
         ]
-        let collectionLimit = limit ?? configuration.maximumCandidateCount
+        let collectionLimit = limit ?? configuration.metadataFetchLimit
         options.fetchLimit = collectionLimit
         options.predicate = predicate
 
@@ -202,6 +205,23 @@ public struct AutomaticScreenshotImporter {
             assets.append(asset)
         }
         return assets
+    }
+
+    private func selectRecentSession(from assets: [PHAsset]) -> [PHAsset] {
+        let candidates = assets.map {
+            AutomaticScreenshotCandidate(
+                identifier: $0.localIdentifier,
+                captureDate: $0.creationDate,
+                pixelSize: PixelSize(width: $0.pixelWidth, height: $0.pixelHeight)
+            )
+        }
+        let selectedIdentifiers = AutomaticScreenshotSessionSelector(configuration: configuration)
+            .newestEligibleSession(from: candidates)
+            .map(\.identifier)
+        let assetsByIdentifier = Dictionary(
+            uniqueKeysWithValues: assets.map { ($0.localIdentifier, $0) }
+        )
+        return selectedIdentifiers.compactMap { assetsByIdentifier[$0] }
     }
 
     private func isLikelyScreenshot(_ asset: PHAsset) -> Bool {
@@ -225,12 +245,26 @@ public struct AutomaticScreenshotImporter {
         }
     }
 
-    private func loadCandidateThumbnail(_ asset: PHAsset) async throws -> Data {
+    private func loadCandidateThumbnail(
+        _ asset: PHAsset,
+        index: Int,
+        total: Int,
+        progress: @escaping @Sendable (StitchProgress) -> Void
+    ) async throws -> Data {
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
         options.isSynchronous = false
         options.resizeMode = .fast
+        options.progressHandler = { value, error, _, _ in
+            guard error == nil, value > 0, value < 1 else { return }
+            progress(StitchProgress(
+                stage: .importing,
+                completed: index,
+                total: total,
+                message: "Downloading recent screenshot \(index + 1) of \(total) from iCloud (\(Int((value * 100).rounded()))%)…"
+            ))
+        }
         let longestSide = max(1, max(asset.pixelWidth, asset.pixelHeight))
         let scale = min(
             1,

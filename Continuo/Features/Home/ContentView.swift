@@ -30,10 +30,8 @@ struct ContentView: View {
     @State private var isSavingToPhotos = false
     @State private var isPreparingHistoryAsset = false
     @State private var showingSaveConfirmation = false
-    @State private var showingDeleteConfirmation = false
     @State private var historyShareID: UUID?
     @State private var showingHistoryShareMenu = false
-    @State private var showingHistoryDeleteConfirmation = false
     @State private var showingHistorySettings = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -143,33 +141,6 @@ struct ContentView: View {
         } message: {
             Text("The full-resolution stitched PNG is now in your Photos library.")
         }
-        .confirmationDialog(
-            "Delete selected source images?",
-            isPresented: $showingDeleteConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                Task { await viewModel.deleteSelectedSources() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This deletes the original selected images from their source locations. The stitched output will not be deleted.")
-        }
-        .confirmationDialog(
-            "Delete source images?",
-            isPresented: $showingHistoryDeleteConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                guard let historyShareID else { return }
-                Task {
-                    await viewModel.deleteCompletedStitchSources(id: historyShareID)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This removes only the original images associated with this saved stitch. The stitched result stays available.")
-        }
     }
 
     private var previewDetail: some View {
@@ -186,18 +157,11 @@ struct ContentView: View {
                         ForEach(viewModel.completedStitches) { stitch in
                             historyPage(stitch)
                                 .frame(width: pageWidth, height: pageHeight, alignment: .top)
-                                .transition(
-                                    .asymmetric(
-                                        insertion: .move(edge: .trailing).combined(with: .opacity),
-                                        removal: .opacity
-                                    )
-                                )
                         }
                     }
-                    .scrollTargetLayout()
                 }
                 .scrollIndicators(.hidden)
-                .scrollTargetBehavior(.viewAligned)
+                .scrollTargetBehavior(.paging)
 
                 if case let .processing(progress) = viewModel.state {
                     stitchingProgressOverlay(progress)
@@ -806,6 +770,12 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
 
+            if isPreparingHistoryAsset,
+               viewModel.historyAssetPreparationID == stitch.id,
+               let progress = viewModel.historyAssetPreparationProgress {
+                historyAssetPreparationView(progress)
+            }
+
             if stitch.sourceDeletionInProgress {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -822,6 +792,29 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityElement(children: .contain)
+    }
+
+    private func historyAssetPreparationView(
+        _ progress: HistoryAssetPreparationProgress
+    ) -> some View {
+        VStack(spacing: 7) {
+            Label(
+                progress.message,
+                systemImage: progress.phase == .ready ? "checkmark.icloud" : "icloud.and.arrow.down"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if let fraction = progress.fraction {
+                ProgressView(value: fraction)
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+            }
+        }
+        .frame(maxWidth: 350)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(progress.message)
     }
 
     private func historyActionsPopover(for stitch: CompletedStitch) -> some View {
@@ -858,7 +851,9 @@ struct ContentView: View {
             if !stitch.sourceImagesDeleted, !stitch.sources.isEmpty {
                 Button(role: .destructive) {
                     showingHistoryShareMenu = false
-                    showingHistoryDeleteConfirmation = true
+                    Task {
+                        await viewModel.deleteCompletedStitchSources(id: stitch.id)
+                    }
                 } label: {
                     Label("Delete source images", systemImage: "trash")
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -883,7 +878,7 @@ struct ContentView: View {
 
                 HStack(spacing: 12) {
                     Button {
-                        showingDeleteConfirmation = true
+                        Task { await viewModel.deleteSelectedSources() }
                     } label: {
                         Label("Delete " + selectedSourceLabel, systemImage: "trash")
                     }
@@ -1035,7 +1030,10 @@ struct ContentView: View {
         isPreparingHistoryAsset = true
 
         Task { @MainActor in
-            defer { isPreparingHistoryAsset = false }
+            defer {
+                isPreparingHistoryAsset = false
+                viewModel.clearHistoryAssetPreparation(id: stitch.id)
+            }
             do {
                 let fileURL = try await viewModel.historyExportURL(for: stitch.id)
                 exportDocument = try StitchedImageDocument(fileURL: fileURL)
@@ -1074,6 +1072,7 @@ struct ContentView: View {
             do {
                 let fileURL = try await viewModel.historyExportURL(for: id)
                 isPreparingHistoryAsset = false
+                viewModel.clearHistoryAssetPreparation(id: id)
                 isSavingToPhotos = true
                 try await photosExporter.save(fileURL: fileURL)
                 viewModel.consumeHistoryAsset(id: id)
@@ -1081,6 +1080,7 @@ struct ContentView: View {
                 showingSaveConfirmation = true
             } catch {
                 isPreparingHistoryAsset = false
+                viewModel.clearHistoryAssetPreparation(id: id)
                 isSavingToPhotos = false
                 exportError = error.localizedDescription
             }
@@ -1363,48 +1363,22 @@ private struct ScreenshotThumbnail: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Screenshot \(index + 1), selected in position \(index + 1)")
         .task(id: source.localURL) {
-            thumbnail = makeThumbnail()
+            let source = source
+            let result = await Task.detached(priority: .utility) {
+                SendableThumbnail(
+                    image: try? ImageNormalizer().makeThumbnail(
+                        source,
+                        maximumPixelSize: 640
+                    )
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            thumbnail = result.image
         }
     }
 
-    private func makeThumbnail() -> CGImage? {
-        // Use the same platform-normalized raster as the stitching engine.
-        // This keeps thumbnails out of Image I/O's direct thumbnail decoder,
-        // which is the path that emits the BGRx8/10-bpc diagnostic for some
-        // HEIF sources.
-        guard let normalized = try? ImageNormalizer().normalize(source) else {
-            return nil
-        }
-        return downsample(normalized.image, maximumPixelSize: 640)
-    }
-
-    private func downsample(_ image: CGImage, maximumPixelSize: Int) -> CGImage? {
-        let longestSide = max(image.width, image.height)
-        guard longestSide > maximumPixelSize else {
-            return image
-        }
-
-        let scale = CGFloat(maximumPixelSize) / CGFloat(longestSide)
-        let width = max(1, Int((CGFloat(image.width) * scale).rounded()))
-        let height = max(1, Int((CGFloat(image.height) * scale).rounded()))
-        guard
-            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-            let context = CGContext(
-                data: nil,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: width * 4,
-                space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            )
-        else {
-            return nil
-        }
-
-        context.interpolationQuality = .medium
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return context.makeImage()
+    private struct SendableThumbnail: @unchecked Sendable {
+        let image: CGImage?
     }
 }
 
@@ -1476,12 +1450,40 @@ private struct HistorySettingsView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                if isSwitching {
+                if let progress = viewModel.historyTransferProgress, isSwitching {
                     Section {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                            Text("Moving stitch history…")
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 10) {
+                                ProgressView(value: progress.fraction)
+                                    .progressViewStyle(.linear)
+                                Text("\(Int((progress.fraction * 100).rounded()))%")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(progress.message)
+                                .font(.subheadline)
+                                .contentTransition(.opacity)
+                            if let currentFile = progress.currentFile {
+                                Text(currentFile)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                         }
+                    }
+                }
+
+                if let result = viewModel.historyTransferResult, !isSwitching {
+                    Section {
+                        Label(result.message, systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    }
+                }
+
+                if let transferError = viewModel.historyTransferError, !isSwitching {
+                    Section {
+                        Label(transferError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
                     }
                 }
             }

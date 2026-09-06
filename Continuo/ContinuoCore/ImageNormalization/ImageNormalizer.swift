@@ -39,18 +39,19 @@ public struct MatchingRepresentation: Equatable, Sendable {
         self.width = width
         self.height = height
         self.grayscale = grayscale
-        let resolvedEdgeMagnitude: [Float]
-        if let edgeMagnitude, edgeMagnitude.count == grayscale.count {
-            resolvedEdgeMagnitude = edgeMagnitude
-        } else {
-            resolvedEdgeMagnitude = Self.makeEdgeMagnitude(from: grayscale, width: width, height: height)
+        let suppliedEdgeMagnitude = edgeMagnitude.flatMap {
+            $0.count == grayscale.count ? $0 : nil
         }
+        let suppliedVerticalGradient = verticalGradient.flatMap {
+            $0.count == grayscale.count ? $0 : nil
+        }
+        let generatedFeatures = suppliedEdgeMagnitude == nil || suppliedVerticalGradient == nil
+            ? Self.makeDerivedFeatures(from: grayscale, width: width, height: height)
+            : nil
+        let resolvedEdgeMagnitude = suppliedEdgeMagnitude ?? generatedFeatures?.edgeMagnitude ?? []
+        let resolvedVerticalGradient = suppliedVerticalGradient ?? generatedFeatures?.verticalGradient ?? []
         self.edgeMagnitude = resolvedEdgeMagnitude
-        if let verticalGradient, verticalGradient.count == grayscale.count {
-            self.verticalGradient = verticalGradient
-        } else {
-            self.verticalGradient = Self.makeVerticalGradient(from: grayscale, width: width, height: height)
-        }
+        self.verticalGradient = resolvedVerticalGradient
 
         if let rowMeans,
            let rowVariances,
@@ -62,12 +63,18 @@ public struct MatchingRepresentation: Equatable, Sendable {
             self.rowVariances = rowVariances
             self.rowEdgeEnergy = rowEdgeEnergy
         } else {
-            let statistics = Self.makeRowStatistics(
-                from: grayscale,
-                edgeMagnitude: resolvedEdgeMagnitude,
-                width: width,
-                height: height
-            )
+            let statistics = suppliedEdgeMagnitude == nil
+                ? (
+                    means: generatedFeatures?.rowMeans ?? [],
+                    variances: generatedFeatures?.rowVariances ?? [],
+                    edgeEnergy: generatedFeatures?.rowEdgeEnergy ?? []
+                )
+                : Self.makeRowStatistics(
+                    from: grayscale,
+                    edgeMagnitude: resolvedEdgeMagnitude,
+                    width: width,
+                    height: height
+                )
             self.rowMeans = statistics.means
             self.rowVariances = statistics.variances
             self.rowEdgeEnergy = statistics.edgeEnergy
@@ -86,56 +93,95 @@ public struct MatchingRepresentation: Equatable, Sendable {
         verticalGradient[(y * width) + x]
     }
 
-    private static func makeVerticalGradient(from grayscale: [Float], width: Int, height: Int) -> [Float] {
+    private static func makeDerivedFeatures(
+        from grayscale: [Float],
+        width: Int,
+        height: Int
+    ) -> (
+        edgeMagnitude: [Float],
+        verticalGradient: [Float],
+        rowMeans: [Float],
+        rowVariances: [Float],
+        rowEdgeEnergy: [Float]
+    ) {
         guard width > 0, height > 0, grayscale.count == width * height else {
-            return [Float](repeating: 0, count: grayscale.count)
-        }
-
-        var gradients = [Float](repeating: 0, count: grayscale.count)
-        var maximum: Float = 0
-        for y in 0..<height {
-            for x in 0..<width {
-                let index = (y * width) + x
-                let top = grayscale[(max(0, y - 1) * width) + x]
-                let bottom = grayscale[(min(height - 1, y + 1) * width) + x]
-                let gradient = (bottom - top) * 0.5
-                gradients[index] = gradient
-                maximum = max(maximum, abs(gradient))
-            }
-        }
-
-        guard maximum > 0.0001 else { return gradients }
-        var divisor = maximum
-        vDSP_vsdiv(gradients, 1, &divisor, &gradients, 1, vDSP_Length(gradients.count))
-        return gradients
-    }
-
-    private static func makeEdgeMagnitude(from grayscale: [Float], width: Int, height: Int) -> [Float] {
-        guard width > 0, height > 0, grayscale.count == width * height else {
-            return [Float](repeating: 0, count: grayscale.count)
+            let zeros = [Float](repeating: 0, count: grayscale.count)
+            let rowZeros = [Float](repeating: 0, count: max(0, height))
+            return (zeros, zeros, rowZeros, rowZeros, rowZeros)
         }
 
         var edges = [Float](repeating: 0, count: grayscale.count)
-        var maximum: Float = 0
+        var verticalGradients = [Float](repeating: 0, count: grayscale.count)
+        var rowMeans = [Float](repeating: 0, count: height)
+        var rowVariances = [Float](repeating: 0, count: height)
+        var rowEdgeEnergy = [Float](repeating: 0, count: height)
+        var maximumEdge: Float = 0
+        var maximumVerticalGradient: Float = 0
+        let rowWidth = Float(width)
         for y in 0..<height {
+            var rowSum: Float = 0
+            var rowSquaredSum: Float = 0
+            var rowEdgeSum: Float = 0
             for x in 0..<width {
                 let index = (y * width) + x
+                let value = grayscale[index]
                 let left = grayscale[(y * width) + max(0, x - 1)]
                 let right = grayscale[(y * width) + min(width - 1, x + 1)]
                 let top = grayscale[(max(0, y - 1) * width) + x]
                 let bottom = grayscale[(min(height - 1, y + 1) * width) + x]
-                let horizontal = (right - left) * 0.5
-                let vertical = (bottom - top) * 0.5
-                let magnitude = sqrt((horizontal * horizontal) + (vertical * vertical))
-                edges[index] = magnitude
-                maximum = max(maximum, magnitude)
+                let horizontalGradient = (right - left) * 0.5
+                let verticalGradient = (bottom - top) * 0.5
+                let edge = sqrt(
+                    (horizontalGradient * horizontalGradient) +
+                        (verticalGradient * verticalGradient)
+                )
+                edges[index] = edge
+                verticalGradients[index] = verticalGradient
+                maximumEdge = max(maximumEdge, edge)
+                maximumVerticalGradient = max(
+                    maximumVerticalGradient,
+                    abs(verticalGradient)
+                )
+                rowSum += value
+                rowSquaredSum += value * value
+                rowEdgeSum += edge
             }
+            let mean = rowSum / rowWidth
+            rowMeans[y] = mean
+            rowVariances[y] = max(0, (rowSquaredSum / rowWidth) - (mean * mean))
+            rowEdgeEnergy[y] = rowEdgeSum / rowWidth
         }
 
-        guard maximum > 0.0001 else { return edges }
-        var divisor = maximum
-        vDSP_vsdiv(edges, 1, &divisor, &edges, 1, vDSP_Length(edges.count))
-        return edges
+        if maximumEdge > 0.0001 {
+            var divisor = maximumEdge
+            vDSP_vsdiv(edges, 1, &divisor, &edges, 1, vDSP_Length(edges.count))
+            vDSP_vsdiv(
+                rowEdgeEnergy,
+                1,
+                &divisor,
+                &rowEdgeEnergy,
+                1,
+                vDSP_Length(rowEdgeEnergy.count)
+            )
+        }
+        if maximumVerticalGradient > 0.0001 {
+            var divisor = maximumVerticalGradient
+            vDSP_vsdiv(
+                verticalGradients,
+                1,
+                &divisor,
+                &verticalGradients,
+                1,
+                vDSP_Length(verticalGradients.count)
+            )
+        }
+        return (
+            edges,
+            verticalGradients,
+            rowMeans,
+            rowVariances,
+            rowEdgeEnergy
+        )
     }
 
     private static func makeRowStatistics(
@@ -184,23 +230,29 @@ public struct MatchingRepresentation: Equatable, Sendable {
 public struct NormalizedImage: @unchecked Sendable {
     public let source: SourceImage
     public let image: CGImage
+    /// A bounded raster used exclusively by registration. The rendered image
+    /// always remains at its original pixel dimensions.
+    public let matchingImage: CGImage
     public let matchingRepresentation: MatchingRepresentation
     public let originalPixelSize: PixelSize
-    /// The full-resolution pixel size used by registration and rendering.
+    /// The full-resolution pixel size used by rendering and export.
     ///
     /// This property retains its original name for renderer compatibility; it
-    /// is no longer a downsampled working size.
+    /// is no longer a downsampled working size; registration uses
+    /// `matchingImage` and `matchingRepresentation` instead.
     public let workingPixelSize: PixelSize
 
     public init(
         source: SourceImage,
         image: CGImage,
+        matchingImage: CGImage? = nil,
         matchingRepresentation: MatchingRepresentation,
         originalPixelSize: PixelSize,
         workingPixelSize: PixelSize
     ) {
         self.source = source
         self.image = image
+        self.matchingImage = matchingImage ?? image
         self.matchingRepresentation = matchingRepresentation
         self.originalPixelSize = originalPixelSize
         self.workingPixelSize = workingPixelSize
@@ -208,9 +260,13 @@ public struct NormalizedImage: @unchecked Sendable {
 }
 
 public struct ImageNormalizationConfiguration: Sendable, Equatable {
-    /// Matching inputs are always decoded at their source pixel dimensions.
-    /// User-facing previews are downsampled separately by the UI.
-    public init() {}
+    /// Longest side used for Vision and correlation. This bounds matching
+    /// cost without affecting the full-resolution compositor or export.
+    public var matchingMaximumPixelSize: Int
+
+    public init(matchingMaximumPixelSize: Int = 1_280) {
+        self.matchingMaximumPixelSize = max(320, matchingMaximumPixelSize)
+    }
 }
 
 public struct ImageNormalizer: Sendable {
@@ -220,7 +276,159 @@ public struct ImageNormalizer: Sendable {
         self.configuration = configuration
     }
 
+    public func makeThumbnail(
+        _ source: SourceImage,
+        maximumPixelSize: Int = 640
+    ) throws -> CGImage {
+        guard FileManager.default.fileExists(atPath: source.localURL.path) else {
+            throw ContinuoError.sourceUnavailable(source.filename ?? source.localURL.lastPathComponent)
+        }
+        guard let imageSource = CGImageSourceCreateWithURL(source.localURL as CFURL, nil) else {
+            throw ContinuoError.unsupportedImage(source.filename ?? source.localURL.lastPathComponent)
+        }
+
+        let boundedMaximum = max(1, maximumPixelSize)
+        let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+        let width = (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let height = (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        let targetSize = scaledPixelSize(
+            PixelSize(width: width, height: height),
+            maximumPixelSize: boundedMaximum
+        )
+
+        if let platformImage = makePlatformRasterImage(
+            from: source.localURL,
+            fallbackSize: targetSize,
+            requiresNonZeroContent: false,
+            maximumPixelSize: boundedMaximum
+        ), let thumbnail = makeDownsampledImage(
+            from: platformImage,
+            maximumPixelSize: boundedMaximum
+        ) {
+            return thumbnail
+        }
+
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: boundedMaximum,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard
+            let decoded = CGImageSourceCreateThumbnailAtIndex(
+                imageSource,
+                0,
+                thumbnailOptions as CFDictionary
+            ),
+            let thumbnail = makeDownsampledImage(
+                from: decoded,
+                maximumPixelSize: boundedMaximum
+            )
+        else {
+            throw ContinuoError.imageDecodeFailed(source.filename ?? source.localURL.lastPathComponent)
+        }
+        return thumbnail
+    }
+
+    /// Builds only the bounded data needed for background registration. The
+    /// `image` field intentionally holds the matching raster here; callers
+    /// must use this value only for validation and later decode originals for
+    /// rendering through `normalize(_:)`.
+    public func normalizeForMatching(_ source: SourceImage) throws -> NormalizedImage {
+        guard FileManager.default.fileExists(atPath: source.localURL.path) else {
+            throw ContinuoError.sourceUnavailable(source.filename ?? source.localURL.lastPathComponent)
+        }
+        guard let imageSource = CGImageSourceCreateWithURL(source.localURL as CFURL, nil) else {
+            throw ContinuoError.unsupportedImage(source.filename ?? source.localURL.lastPathComponent)
+        }
+
+        let properties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+        let originalSize = PixelSize(
+            width: (properties?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0,
+            height: (properties?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        )
+        let maximumPixelSize = configuration.matchingMaximumPixelSize
+        let targetSize = scaledPixelSize(
+            originalSize,
+            maximumPixelSize: maximumPixelSize
+        )
+        let matchingImage: CGImage
+        if let platformImage = makePlatformRasterImage(
+            from: source.localURL,
+            fallbackSize: targetSize,
+            requiresNonZeroContent: false,
+            maximumPixelSize: maximumPixelSize
+        ) {
+            matchingImage = makeDownsampledImage(
+                from: platformImage,
+                maximumPixelSize: maximumPixelSize
+            ) ?? platformImage
+        } else {
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+            guard let decoded = CGImageSourceCreateThumbnailAtIndex(
+                imageSource,
+                0,
+                options as CFDictionary
+            ) else {
+                throw ContinuoError.imageDecodeFailed(source.filename ?? source.localURL.lastPathComponent)
+            }
+            matchingImage = decoded
+        }
+
+        let resolvedOriginalSize = originalSize.width > 0 && originalSize.height > 0
+            ? originalSize
+            : PixelSize(width: matchingImage.width, height: matchingImage.height)
+        var normalizedSource = source
+        normalizedSource.pixelSize = resolvedOriginalSize
+        normalizedSource.orientation = .up
+        return NormalizedImage(
+            source: normalizedSource,
+            image: matchingImage,
+            matchingImage: matchingImage,
+            matchingRepresentation: makeMatchingRepresentation(from: matchingImage),
+            originalPixelSize: resolvedOriginalSize,
+            workingPixelSize: resolvedOriginalSize
+        )
+    }
+
+    /// Decodes the full-resolution, orientation-normalized raster needed by
+    /// the compositor without allocating matching-analysis buffers.
+    public func makeRenderingImage(_ source: SourceImage) throws -> CGImage {
+        try decodeNormalizedRaster(source).image
+    }
+
     public func normalize(_ source: SourceImage) throws -> NormalizedImage {
+        let decoded = try decodeNormalizedRaster(source)
+        let normalizedImage = decoded.image
+        let originalSize = decoded.originalSize
+        let workingSize = PixelSize(width: normalizedImage.width, height: normalizedImage.height)
+        let matchingImage = makeDownsampledImage(
+            from: normalizedImage,
+            maximumPixelSize: configuration.matchingMaximumPixelSize
+        ) ?? normalizedImage
+        let matching = makeMatchingRepresentation(from: matchingImage)
+        var normalizedSource = source
+        normalizedSource.pixelSize = originalSize.width > 0 && originalSize.height > 0 ? originalSize : workingSize
+        normalizedSource.orientation = .up
+
+        return NormalizedImage(
+            source: normalizedSource,
+            image: normalizedImage,
+            matchingImage: matchingImage,
+            matchingRepresentation: matching,
+            originalPixelSize: originalSize.width > 0 && originalSize.height > 0 ? originalSize : workingSize,
+            workingPixelSize: workingSize
+        )
+    }
+
+    private func decodeNormalizedRaster(
+        _ source: SourceImage
+    ) throws -> (image: CGImage, originalSize: PixelSize) {
         guard FileManager.default.fileExists(atPath: source.localURL.path) else {
             throw ContinuoError.sourceUnavailable(source.filename ?? source.localURL.lastPathComponent)
         }
@@ -269,19 +477,7 @@ public struct ImageNormalizer: Sendable {
             normalizedImage = renderedImage
         }
 
-        let workingSize = PixelSize(width: normalizedImage.width, height: normalizedImage.height)
-        let matching = makeMatchingRepresentation(from: normalizedImage)
-        var normalizedSource = source
-        normalizedSource.pixelSize = originalSize.width > 0 && originalSize.height > 0 ? originalSize : workingSize
-        normalizedSource.orientation = .up
-
-        return NormalizedImage(
-            source: normalizedSource,
-            image: normalizedImage,
-            matchingRepresentation: matching,
-            originalPixelSize: originalSize.width > 0 && originalSize.height > 0 ? originalSize : workingSize,
-            workingPixelSize: workingSize
-        )
+        return (normalizedImage, originalSize)
     }
 
     private func makeNormalizedColorImage(
@@ -352,18 +548,24 @@ public struct ImageNormalizer: Sendable {
     private func makePlatformRasterImage(
         from url: URL,
         fallbackSize: PixelSize,
-        requiresNonZeroContent: Bool
+        requiresNonZeroContent: Bool,
+        maximumPixelSize: Int? = nil
     ) -> CGImage? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-
         #if canImport(UIKit)
         var configuration = UIImageReader.Configuration()
         configuration.prefersHighDynamicRange = false
         configuration.preparesImagesForDisplay = true
-        configuration.preferredThumbnailSize = .zero
+        if let maximumPixelSize {
+            configuration.preferredThumbnailSize = CGSize(
+                width: maximumPixelSize,
+                height: maximumPixelSize
+            )
+        } else {
+            configuration.preferredThumbnailSize = .zero
+        }
         configuration.pixelsPerInch = 0
         let reader = UIImageReader(configuration: configuration)
-        if let image = reader.image(data: data) {
+        if let image = reader.image(contentsOf: url) {
             let format = UIGraphicsImageRendererFormat()
             format.scale = image.scale
             format.opaque = false
@@ -382,7 +584,7 @@ public struct ImageNormalizer: Sendable {
         #endif
 
         #if canImport(AppKit)
-        if let image = NSImage(data: data) {
+        if let image = NSImage(contentsOf: url) {
             let width = max(1, fallbackSize.width)
             let height = max(1, fallbackSize.height)
             guard let bitmap = NSBitmapImageRep(
@@ -423,6 +625,53 @@ public struct ImageNormalizer: Sendable {
         #endif
 
         return nil
+    }
+
+    private func scaledPixelSize(
+        _ size: PixelSize,
+        maximumPixelSize: Int
+    ) -> PixelSize {
+        let longestSide = max(size.width, size.height)
+        guard longestSide > maximumPixelSize, longestSide > 0 else {
+            return PixelSize(width: max(1, size.width), height: max(1, size.height))
+        }
+        let scale = Double(maximumPixelSize) / Double(longestSide)
+        return PixelSize(
+            width: max(1, Int((Double(size.width) * scale).rounded())),
+            height: max(1, Int((Double(size.height) * scale).rounded()))
+        )
+    }
+
+    private func makeDownsampledImage(
+        from image: CGImage,
+        maximumPixelSize: Int
+    ) -> CGImage? {
+        let size = scaledPixelSize(
+            PixelSize(width: image.width, height: image.height),
+            maximumPixelSize: maximumPixelSize
+        )
+        guard size.width != image.width || size.height != image.height else {
+            return image
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                  data: nil,
+                  width: size.width,
+                  height: size.height,
+                  bitsPerComponent: 8,
+                  bytesPerRow: size.width * 4,
+                  space: colorSpace,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return nil
+        }
+
+        context.interpolationQuality = .medium
+        context.draw(
+            image,
+            in: CGRect(x: 0, y: 0, width: size.width, height: size.height)
+        )
+        return context.makeImage()
     }
 
     private func hasNonZeroPixel(in image: CGImage) -> Bool {

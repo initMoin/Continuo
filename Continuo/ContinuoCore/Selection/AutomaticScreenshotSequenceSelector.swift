@@ -2,26 +2,132 @@ import Foundation
 
 public struct AutomaticScreenshotSelectionConfiguration: Sendable, Equatable {
     public var maximumCandidateCount: Int
+    public var metadataFetchLimit: Int
     public var maximumLookahead: Int
     public var maximumTemporalGap: TimeInterval
+    public var maximumSessionDuration: TimeInterval
+    public var maximumRecentAge: TimeInterval
     public var minimumSequenceLength: Int
     public var dimensionTolerance: Double
     public var candidateMaximumPixelSize: Int
 
     public init(
-        maximumCandidateCount: Int = 50,
-        maximumLookahead: Int = 3,
-        maximumTemporalGap: TimeInterval = 5 * 60,
+        maximumCandidateCount: Int = 12,
+        metadataFetchLimit: Int = 80,
+        maximumLookahead: Int = 2,
+        maximumTemporalGap: TimeInterval = 2 * 60,
+        maximumSessionDuration: TimeInterval = 10 * 60,
+        maximumRecentAge: TimeInterval = 24 * 60 * 60,
         minimumSequenceLength: Int = 2,
         dimensionTolerance: Double = 0.02,
-        candidateMaximumPixelSize: Int = 1_200
+        candidateMaximumPixelSize: Int = 720
     ) {
         self.maximumCandidateCount = max(2, maximumCandidateCount)
+        self.metadataFetchLimit = max(self.maximumCandidateCount, metadataFetchLimit)
         self.maximumLookahead = max(1, maximumLookahead)
         self.maximumTemporalGap = max(1, maximumTemporalGap)
+        self.maximumSessionDuration = max(self.maximumTemporalGap, maximumSessionDuration)
+        self.maximumRecentAge = max(self.maximumSessionDuration, maximumRecentAge)
         self.minimumSequenceLength = max(2, minimumSequenceLength)
         self.dimensionTolerance = min(1, max(0, dimensionTolerance))
         self.candidateMaximumPixelSize = max(320, candidateMaximumPixelSize)
+    }
+}
+
+public struct AutomaticScreenshotCandidate: Sendable, Equatable {
+    public let identifier: String
+    public let captureDate: Date?
+    public let pixelSize: PixelSize
+
+    public init(identifier: String, captureDate: Date?, pixelSize: PixelSize) {
+        self.identifier = identifier
+        self.captureDate = captureDate
+        self.pixelSize = pixelSize
+    }
+}
+
+/// Selects one recent, coherent capture session before any screenshot pixels
+/// are requested from Photos.
+public struct AutomaticScreenshotSessionSelector: Sendable {
+    public var configuration: AutomaticScreenshotSelectionConfiguration
+
+    public init(
+        configuration: AutomaticScreenshotSelectionConfiguration = AutomaticScreenshotSelectionConfiguration()
+    ) {
+        self.configuration = configuration
+    }
+
+    public func newestEligibleSession(
+        from candidates: [AutomaticScreenshotCandidate]
+    ) -> [AutomaticScreenshotCandidate] {
+        let datedCandidates = candidates
+            .filter { $0.captureDate != nil }
+            .sorted { lhs, rhs in
+                guard let leftDate = lhs.captureDate, let rightDate = rhs.captureDate else {
+                    return lhs.identifier < rhs.identifier
+                }
+                if leftDate != rightDate {
+                    return leftDate > rightDate
+                }
+                return lhs.identifier < rhs.identifier
+            }
+
+        var sessions: [[AutomaticScreenshotCandidate]] = []
+        for candidate in datedCandidates {
+            guard let captureDate = candidate.captureDate else { continue }
+            var matchingSessionIndex: Int?
+
+            for index in sessions.indices {
+                guard
+                    let newestDate = sessions[index].first?.captureDate,
+                    let oldestDate = sessions[index].last?.captureDate,
+                    oldestDate.timeIntervalSince(captureDate) <= configuration.maximumTemporalGap,
+                    newestDate.timeIntervalSince(captureDate) <= configuration.maximumSessionDuration,
+                    dimensionsCompatible(candidate, sessions[index][0])
+                else {
+                    continue
+                }
+                matchingSessionIndex = index
+                break
+            }
+
+            if let matchingSessionIndex {
+                sessions[matchingSessionIndex].append(candidate)
+            } else {
+                sessions.append([candidate])
+            }
+        }
+
+        guard let newestSession = sessions.first(where: {
+            $0.count >= configuration.minimumSequenceLength
+        }) else {
+            return []
+        }
+
+        return Array(newestSession.prefix(configuration.maximumCandidateCount).reversed())
+    }
+
+    private func dimensionsCompatible(
+        _ lhs: AutomaticScreenshotCandidate,
+        _ rhs: AutomaticScreenshotCandidate
+    ) -> Bool {
+        guard
+            lhs.pixelSize.width > 0,
+            lhs.pixelSize.height > 0,
+            rhs.pixelSize.width > 0,
+            rhs.pixelSize.height > 0
+        else {
+            return false
+        }
+
+        let widthDelta = relativeDelta(lhs.pixelSize.width, rhs.pixelSize.width)
+        let heightDelta = relativeDelta(lhs.pixelSize.height, rhs.pixelSize.height)
+        return widthDelta <= configuration.dimensionTolerance &&
+            heightDelta <= configuration.dimensionTolerance
+    }
+
+    private func relativeDelta(_ lhs: Int, _ rhs: Int) -> Double {
+        abs(Double(lhs - rhs)) / Double(max(1, max(lhs, rhs)))
     }
 }
 
