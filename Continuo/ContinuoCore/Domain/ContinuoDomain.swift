@@ -155,9 +155,23 @@ public enum CanvasLayout: String, Codable, Sendable {
     case freeform
 }
 
-public enum StitchDirection: String, Codable, Sendable {
+public enum StitchDirection: String, Codable, Hashable, Sendable {
     case vertical
     case horizontal
+
+    public var title: String {
+        switch self {
+        case .vertical: "Vertical"
+        case .horizontal: "Horizontal"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .vertical: "distribute.vertical.fill"
+        case .horizontal: "distribute.horizontal.fill"
+        }
+    }
 }
 
 public enum ConfidenceLevel: String, Codable, CaseIterable, Sendable {

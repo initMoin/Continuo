@@ -36,6 +36,7 @@ public struct RegistrationConfiguration: Sendable, Equatable {
     /// Prevents shared columns or fixed chrome from making unrelated images
     /// look like a valid medium-confidence vertical match.
     public var minimumStructuralSimilarityThreshold: Double
+    public var visionFallbackEnabled: Bool
 
     public init(
         minimumOverlapRatio: Double = 0.18,
@@ -58,7 +59,8 @@ public struct RegistrationConfiguration: Sendable, Equatable {
         minimumVerticalTranslationRatio: Double = 0.02,
         matchingTopExclusionRatio: Double = 0.10,
         matchingBottomExclusionRatio: Double = 0.04,
-        minimumStructuralSimilarityThreshold: Double = 0.52
+        minimumStructuralSimilarityThreshold: Double = 0.52,
+        visionFallbackEnabled: Bool = true
     ) {
         self.minimumOverlapRatio = minimumOverlapRatio
         self.maximumCrossAxisDriftRatio = maximumCrossAxisDriftRatio
@@ -79,6 +81,7 @@ public struct RegistrationConfiguration: Sendable, Equatable {
         self.matchingTopExclusionRatio = min(0.30, max(0, matchingTopExclusionRatio))
         self.matchingBottomExclusionRatio = min(0.20, max(0, matchingBottomExclusionRatio))
         self.minimumStructuralSimilarityThreshold = min(1, max(0, minimumStructuralSimilarityThreshold))
+        self.visionFallbackEnabled = visionFallbackEnabled
     }
 }
 
@@ -99,8 +102,8 @@ public struct PairwiseRegistrar: Sendable {
                 to: to,
                 reason: .unsupportedDirection,
                 code: "registration.unsupported_direction",
-                message: "This foundation milestone registers vertical screenshot sequences only.",
-                suggestion: "Choose a vertical screenshot sequence and try again.",
+                message: "This registrar expects sources in vertical coordinate space.",
+                suggestion: "Use StitchEngine’s direction-aware workflow and try again.",
                 elapsedMilliseconds: elapsedMilliseconds(since: startedAt)
             )
         }
@@ -123,10 +126,9 @@ public struct PairwiseRegistrar: Sendable {
         // Most adjacent screenshots have no material cross-axis drift. Let
         // the deterministic row profile settle those inexpensive cases before
         // invoking Vision, which is reserved for the ambiguous fallback.
-        let visionTranslation = await visionTranslation(
-            from: from.matchingImage,
-            to: to.matchingImage
-        )
+        let visionTranslation = configuration.visionFallbackEnabled
+            ? await visionTranslation(from: from.matchingImage, to: to.matchingImage)
+            : nil
         try Task.checkCancellation()
 
         let minimumVerticalTranslation = minimumVerticalTranslation(from: from, to: to)
@@ -1125,7 +1127,7 @@ public struct PairwiseRegistrar: Sendable {
             case .lowVisualAgreement: "The proposed overlap does not agree closely enough to commit automatically."
             case .ambiguousMatch: "Several overlaps look similarly plausible, so this join needs review."
             case .noMatchFound: "No usable overlap was found."
-            case .unsupportedDirection: "This direction is not available in the current foundation milestone."
+            case .unsupportedDirection: "This registration path expects vertical coordinate space."
             }
         }
         return switch confidence {
@@ -1144,7 +1146,7 @@ public struct PairwiseRegistrar: Sendable {
         case .lowVisualAgreement: "Retry with a different adjacent pair or inspect the source order."
         case .ambiguousMatch: "Open Proof Mode in a later milestone to choose the intended seam."
         case .noMatchFound: "Check the selected order and verify both images are readable."
-        case .unsupportedDirection: "Use vertical mode for this milestone."
+        case .unsupportedDirection: "Use the direction control in the stitch workflow."
         }
     }
 }

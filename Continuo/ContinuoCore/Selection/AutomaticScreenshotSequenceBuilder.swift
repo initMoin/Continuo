@@ -20,9 +20,17 @@ public struct AutomaticScreenshotSequenceBuilder: Sendable {
 
     public func select(
         from sources: [SourceImage],
+        prioritizedCandidateIDs: Set<String>? = nil,
         progress: @escaping @Sendable (StitchProgress) -> Void = { _ in }
     ) async throws -> AutomaticScreenshotSequenceSelection {
-        let orderedSources = sources.enumerated()
+        let prioritizedSources = prioritizedCandidateIDs.map { ids in
+            let filtered = sources.filter { source in
+                guard let identifier = source.sourceIdentifier else { return false }
+                return ids.contains(identifier)
+            }
+            return filtered.count >= configuration.minimumSequenceLength ? filtered : sources
+        } ?? sources
+        let orderedSources = prioritizedSources.enumerated()
             .sorted { lhs, rhs in
                 switch (lhs.element.captureDate, rhs.element.captureDate) {
                 case let (left?, right?) where left != right:

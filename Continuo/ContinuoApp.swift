@@ -9,9 +9,18 @@ import SwiftUI
 
 @main
 struct ContinuoApp: App {
+#if os(macOS)
+    init() {
+        ContinuoFontRegistrar.registerBundledFonts()
+    }
+#endif
+
     var body: some Scene {
         WindowGroup {
             ContentView()
         }
+#if os(macOS)
+        .windowStyle(.hiddenTitleBar)
+#endif
     }
 }

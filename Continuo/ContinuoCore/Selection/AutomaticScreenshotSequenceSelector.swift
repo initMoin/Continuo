@@ -12,15 +12,15 @@ public struct AutomaticScreenshotSelectionConfiguration: Sendable, Equatable {
     public var candidateMaximumPixelSize: Int
 
     public init(
-        maximumCandidateCount: Int = 12,
-        metadataFetchLimit: Int = 80,
+        maximumCandidateCount: Int = 8,
+        metadataFetchLimit: Int = 32,
         maximumLookahead: Int = 2,
         maximumTemporalGap: TimeInterval = 2 * 60,
         maximumSessionDuration: TimeInterval = 10 * 60,
         maximumRecentAge: TimeInterval = 24 * 60 * 60,
         minimumSequenceLength: Int = 2,
         dimensionTolerance: Double = 0.02,
-        candidateMaximumPixelSize: Int = 720
+        candidateMaximumPixelSize: Int = 512
     ) {
         self.maximumCandidateCount = max(2, maximumCandidateCount)
         self.metadataFetchLimit = max(self.maximumCandidateCount, metadataFetchLimit)
@@ -134,13 +134,15 @@ public struct AutomaticScreenshotSessionSelector: Sendable {
 public struct AutomaticScreenshotSequenceSelection: Sendable, Equatable {
     public let sources: [SourceImage]
     public let score: Double
-    public let joinCount: Int
+    public let joins: [JoinResult]
 
-    public init(sources: [SourceImage], score: Double, joinCount: Int) {
+    public init(sources: [SourceImage], score: Double, joins: [JoinResult]) {
         self.sources = sources
         self.score = score
-        self.joinCount = joinCount
+        self.joins = joins
     }
+
+    public var joinCount: Int { joins.count }
 }
 
 /// Chooses the strongest chronological path through screenshot candidates.
@@ -290,10 +292,16 @@ public struct AutomaticScreenshotSequenceSelector: Sendable {
         }
 
         let selectedSources = best.path.map { orderedSources[$0] }
+        let selectedJoins = zip(selectedSources, selectedSources.dropFirst()).compactMap { from, to in
+            joinLookup[JoinKey(from: from.id, to: to.id)]
+        }
+        guard selectedJoins.count == selectedSources.count - 1 else {
+            return nil
+        }
         return AutomaticScreenshotSequenceSelection(
             sources: selectedSources,
             score: best.score,
-            joinCount: max(0, selectedSources.count - 1)
+            joins: selectedJoins
         )
     }
 

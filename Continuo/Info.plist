@@ -12,5 +12,9 @@
 			<string>Continuo</string>
 		</dict>
 	</dict>
+	<key>UIAppFonts</key>
+	<array>
+		<string>RacingSansOne-Regular.ttf</string>
+	</array>
 </dict>
 </plist>

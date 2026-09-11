@@ -20,3 +20,6 @@ build/
 
 # macOS
 .DS_Store
+
+# Standalone documentation experiments
+Continuo-Markdown-Render-Test/

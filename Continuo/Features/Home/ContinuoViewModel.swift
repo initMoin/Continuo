@@ -44,19 +44,25 @@ final class ContinuoViewModel {
     var sourceCleanupError: String?
     var preparationStatus: String?
     private(set) var historyStorageLocation: HistoryStorageLocation
+    private var requestedHistoryStorageLocation: HistoryStorageLocation
+    private(set) var historySyncState: HistorySyncState
+    private(set) var historyLastSyncedAt: Date?
+    private(set) var historySyncError: String?
     private(set) var historyTransferProgress: HistoryTransferProgress?
     private(set) var historyTransferResult: HistoryTransferResult?
     private(set) var historyTransferError: String?
     private(set) var historyAssetPreparationID: UUID?
     private(set) var historyAssetPreparationProgress: HistoryAssetPreparationProgress?
     private(set) var isCurrentPreviewSaved = false
+    var intelligenceMode: StitchIntelligenceMode
+    private(set) var stitchDirection: StitchDirection = .vertical
 
     private let photosImporter = PhotosImageImporter()
     private let automaticScreenshotImporter = AutomaticScreenshotImporter()
     private let filesImporter = FileImageImporter()
     private let sourceDeletionService = SourceDeletionService()
     private var historyImageStore: HistoryImageStore
-    private let engine = StitchEngine()
+    private var engine = StitchEngine(direction: .vertical)
     private var processingTask: Task<Void, Never>?
     private var mappingPreparationTask: Task<[JoinResult], Error>?
     private var mappingPreparationObserver: Task<Void, Never>?
@@ -64,6 +70,10 @@ final class ContinuoViewModel {
     private var preparedJoinsByPair: [MappingPairKey: JoinResult] = [:]
     private var mappingPreparationSourceIDs: [UUID]?
     private var historyArchiveTask: Task<Void, Never>?
+    private var historyLoadTask: Task<Void, Never>?
+    private var historyRecoveryTask: Task<Void, Never>?
+    private var historySyncMonitorTask: Task<Void, Never>?
+    private(set) var isLoadingHistory = false
     /// Progress callbacks are delivered through main-actor tasks. This token
     /// prevents a callback from an older stitch from changing the state of a
     /// newer stitch, or from changing `.ready` back to `.processing(.complete)`
@@ -71,8 +81,29 @@ final class ContinuoViewModel {
     private var activeStitchID: UUID?
     private let logger = Logger(subsystem: "dev.iamshift.Continuo", category: "stitching")
     private static let historyStoragePreferenceKey = "historyStorageLocation"
+    private static let locallyDeletedHistoryKey = "locallyDeletedHistoryIDs"
+    private static let intelligenceModePreferenceKey = "stitchIntelligenceMode"
 
-    init(historyImageStore: HistoryImageStore? = nil) {
+    private static func locallyDeletedHistoryIDs() -> Set<UUID> {
+        Set(
+            (UserDefaults.standard.stringArray(forKey: Self.locallyDeletedHistoryKey) ?? [])
+                .compactMap(UUID.init(uuidString:))
+        )
+    }
+
+    private static func setLocallyDeletedHistoryIDs(_ ids: Set<UUID>) {
+        UserDefaults.standard.set(ids.map(\.uuidString).sorted(), forKey: Self.locallyDeletedHistoryKey)
+    }
+
+    private static func visibleHistory(_ stitches: [CompletedStitch]) -> [CompletedStitch] {
+        let locallyDeleted = locallyDeletedHistoryIDs()
+        return stitches.filter { !locallyDeleted.contains($0.id) }
+    }
+
+    init(
+        historyImageStore: HistoryImageStore? = nil,
+        loadsHistoryInBackground: Bool = false
+    ) {
         let preferredLocation = HistoryStorageLocation(
             rawValue: UserDefaults.standard.string(forKey: Self.historyStoragePreferenceKey) ?? ""
         ) ?? .onThisDevice
@@ -80,10 +111,62 @@ final class ContinuoViewModel {
         let usableStore = configuredStore.isAvailable ? configuredStore : HistoryImageStore()
         self.historyImageStore = usableStore
         self.historyStorageLocation = usableStore.location
-        do {
-            completedStitches = try usableStore.load()
-        } catch {
-            logger.error("Could not load stitch history: \(error.localizedDescription, privacy: .public)")
+        self.requestedHistoryStorageLocation = preferredLocation
+        self.historySyncState = preferredLocation == .iCloudDrive && usableStore.location != .iCloudDrive
+            ? .unavailable
+            : (usableStore.location == .iCloudDrive ? .syncing : .localOnly)
+        self.historyLastSyncedAt = nil
+        self.historySyncError = preferredLocation == .iCloudDrive && usableStore.location != .iCloudDrive
+            ? HistoryImageStoreError.iCloudUnavailable.localizedDescription
+            : nil
+        self.intelligenceMode = StitchIntelligenceMode(
+            rawValue: UserDefaults.standard.string(forKey: Self.intelligenceModePreferenceKey) ?? ""
+        ) ?? .automatic
+        if preferredLocation == .iCloudDrive {
+            startHistorySyncMonitor()
+        }
+        if loadsHistoryInBackground {
+            isLoadingHistory = true
+            historyLoadTask = Task { [weak self, usableStore] in
+                do {
+                    let loaded = try await Task.detached(priority: .utility) {
+                        try usableStore.load()
+                    }.value
+                    guard let self, !Task.isCancelled else { return }
+                    completedStitches = Self.visibleHistory(loaded)
+                    if usableStore.location == .iCloudDrive {
+                        historySyncState = .upToDate
+                        historyLastSyncedAt = Date()
+                        historySyncError = nil
+                    }
+                    isLoadingHistory = false
+                } catch is CancellationError {
+                    guard let self else { return }
+                    isLoadingHistory = false
+                } catch {
+                    guard let self, !Task.isCancelled else { return }
+                    isLoadingHistory = false
+                    if usableStore.location == .iCloudDrive {
+                        historySyncState = .failed
+                        historySyncError = error.localizedDescription
+                    }
+                    logger.error("Could not load stitch history: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        } else {
+            do {
+                completedStitches = try usableStore.load()
+                if usableStore.location == .iCloudDrive {
+                    historySyncState = .upToDate
+                    historyLastSyncedAt = Date()
+                }
+            } catch {
+                if usableStore.location == .iCloudDrive {
+                    historySyncState = .failed
+                    historySyncError = error.localizedDescription
+                }
+                logger.error("Could not load stitch history: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -91,10 +174,132 @@ final class ContinuoViewModel {
         historyImageStore.isAvailable
     }
 
+    var isHistorySyncEnabled: Bool {
+        requestedHistoryStorageLocation == .iCloudDrive
+    }
+
+    var isProcessing: Bool {
+        if case .processing = state {
+            return true
+        }
+        return false
+    }
+
+    /// Refreshes the lightweight history records after iCloud Drive has had
+    /// an opportunity to receive changes from another device.
+    func refreshHistoryIfNeeded() {
+        guard isHistorySyncEnabled,
+              !isLoadingHistory,
+              !isProcessing,
+              historyArchiveTask == nil,
+              historyRecoveryTask == nil,
+              historyTransferProgress?.phase == nil || historyTransferProgress?.phase == .finished
+        else {
+            return
+        }
+
+        guard historyStorageLocation == .iCloudDrive else {
+            historyRecoveryTask = Task { [weak self] in
+                _ = await self?.switchHistoryStorageLocation(to: .iCloudDrive)
+                guard let self else { return }
+                historyRecoveryTask = nil
+            }
+            return
+        }
+
+        historyLoadTask?.cancel()
+        isLoadingHistory = true
+        historySyncState = .syncing
+        historySyncError = nil
+        let store = historyImageStore
+        historyLoadTask = Task { [weak self, store] in
+            do {
+                let loaded = try await Task.detached(priority: .utility) {
+                    try store.load()
+                }.value
+                guard let self, !Task.isCancelled else { return }
+                completedStitches = Self.visibleHistory(loaded)
+                isLoadingHistory = false
+                historySyncState = .upToDate
+                historyLastSyncedAt = Date()
+                historySyncError = nil
+                historyLoadTask = nil
+            } catch is CancellationError {
+                guard let self else { return }
+                isLoadingHistory = false
+                historyLoadTask = nil
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                isLoadingHistory = false
+                historySyncState = .failed
+                historySyncError = error.localizedDescription
+                historyLoadTask = nil
+                logger.error("Could not refresh iCloud stitch history: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// Retries an unavailable or failed iCloud operation while the app is
+    /// active. Healthy history is not reloaded on every retry tick.
+    func retryHistorySyncIfNeeded() {
+        guard isHistorySyncEnabled,
+              historyStorageLocation != .iCloudDrive || historySyncState == .unavailable || historySyncState == .failed
+        else {
+            return
+        }
+        refreshHistoryIfNeeded()
+    }
+
+    private func startHistorySyncMonitor() {
+        historySyncMonitorTask?.cancel()
+        historySyncMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, let self else { return }
+                retryHistorySyncIfNeeded()
+            }
+        }
+    }
+
+    func setIntelligenceMode(_ mode: StitchIntelligenceMode) {
+        intelligenceMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.intelligenceModePreferenceKey)
+    }
+
+    func setStitchDirection(_ direction: StitchDirection) {
+        guard stitchDirection != direction else { return }
+        stitchDirection = direction
+        engine.direction = direction
+        preparedJoinsByPair.removeAll(keepingCapacity: false)
+        resetResult()
+    }
+
     func switchHistoryStorageLocation(to location: HistoryStorageLocation) async -> String? {
+        requestedHistoryStorageLocation = location
+        UserDefaults.standard.set(location.rawValue, forKey: Self.historyStoragePreferenceKey)
+
+        if location == .onThisDevice {
+            historyRecoveryTask?.cancel()
+            historyRecoveryTask = nil
+            historySyncMonitorTask?.cancel()
+            historySyncMonitorTask = nil
+        } else {
+            startHistorySyncMonitor()
+        }
+
         guard location != historyStorageLocation else {
+            historySyncState = location == .iCloudDrive ? .upToDate : .localOnly
+            historySyncError = nil
             return nil
         }
+
+        historyLoadTask?.cancel()
+        if location == .onThisDevice {
+            historyRecoveryTask?.cancel()
+        }
+        historyLoadTask = nil
+        historyRecoveryTask = nil
+        isLoadingHistory = false
 
         historyTransferProgress = HistoryTransferProgress(
             phase: .preparing,
@@ -104,11 +309,15 @@ final class ContinuoViewModel {
         )
         historyTransferResult = nil
         historyTransferError = nil
+        historySyncError = nil
+        historySyncState = location == .iCloudDrive ? .syncing : .localOnly
 
         let currentStore = historyImageStore
         let destinationStore = HistoryImageStore(location: location)
         guard destinationStore.isAvailable else {
             historyTransferProgress = nil
+            historySyncState = .unavailable
+            historySyncError = HistoryImageStoreError.iCloudUnavailable.localizedDescription
             historyTransferError = HistoryImageStoreError.iCloudUnavailable.localizedDescription
             return HistoryImageStoreError.iCloudUnavailable.localizedDescription
         }
@@ -153,8 +362,10 @@ final class ContinuoViewModel {
             }.value
             historyImageStore = destinationStore
             historyStorageLocation = location
-            completedStitches = loaded
-            UserDefaults.standard.set(location.rawValue, forKey: Self.historyStoragePreferenceKey)
+                completedStitches = Self.visibleHistory(loaded)
+            historySyncState = location == .iCloudDrive ? .upToDate : .localOnly
+            historyLastSyncedAt = location == .iCloudDrive ? Date() : nil
+            historySyncError = nil
             historyTransferProgress = HistoryTransferProgress(
                 phase: .finished,
                 completed: result.copiedFileCount,
@@ -166,6 +377,8 @@ final class ContinuoViewModel {
             return nil
         } catch {
             historyTransferProgress = nil
+            historySyncState = location == .iCloudDrive ? .failed : .localOnly
+            historySyncError = error.localizedDescription
             historyTransferError = error.localizedDescription
             logger.error("Could not move stitch history to \(location.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return error.localizedDescription
@@ -176,11 +389,14 @@ final class ContinuoViewModel {
         processingTask?.cancel()
         mappingPreparationTask?.cancel()
         mappingPreparationObserver?.cancel()
+        historyLoadTask?.cancel()
+        historyRecoveryTask?.cancel()
+        historySyncMonitorTask?.cancel()
     }
 
     func importPhotos(_ results: [PHPickerResult]) {
         logger.info("Received photo selection with \(results.count) item(s) and Photos asset identifiers.")
-        let pendingArchiveTask = prepareForIncomingSources()
+        let pendingArchiveTask = prepareForIncomingSources(replacesCurrentSelection: false)
         if pendingArchiveTask == nil {
             preparationStatus = "Preparing screenshots for stitching…"
         }
@@ -224,7 +440,7 @@ final class ContinuoViewModel {
     }
 
     func importFiles(_ urls: [URL]) {
-        let pendingArchiveTask = prepareForIncomingSources()
+        let pendingArchiveTask = prepareForIncomingSources(replacesCurrentSelection: false)
         guard let pendingArchiveTask else {
             importFileURLs(urls, cancelCurrentTask: false)
             return
@@ -259,17 +475,29 @@ final class ContinuoViewModel {
             return
         }
 
-        let pendingArchiveTask = prepareForIncomingSources()
+        if stitchDirection != .vertical {
+            stitchDirection = .vertical
+            engine.direction = .vertical
+            preparedJoinsByPair.removeAll(keepingCapacity: false)
+        }
+
+        let pendingArchiveTask = prepareForIncomingSources(replacesCurrentSelection: true)
         if pendingArchiveTask == nil {
-            preparationStatus = "Finding nearby screenshots that fit together…"
+            preparationStatus = "Preparing screenshots for stitching…"
         }
 
         let importer = automaticScreenshotImporter
+        let mode = intelligenceMode
         let discoveryRegistrar = PairwiseRegistrar(configuration: RegistrationConfiguration(
             maximumSeedOffsets: 6,
-            coarseDriftSamples: 13
+            coarseDriftSamples: 13,
+            visionFallbackEnabled: mode != .automatic
         ))
-        let builder = AutomaticScreenshotSequenceBuilder(registrar: discoveryRegistrar)
+        let builder = AutomaticScreenshotSequenceBuilder(
+            registrar: discoveryRegistrar,
+            maximumConcurrentRegistrations: 4
+        )
+        let intelligenceAdvisor = ScreenshotIntelligenceFactory.advisor(for: mode)
         processingTask = Task { [weak self] in
             await pendingArchiveTask?.value
             guard let owner = self, !Task.isCancelled else { return }
@@ -277,15 +505,13 @@ final class ContinuoViewModel {
                 owner.processingTask = nil
                 return
             }
-            owner.preparationStatus = "Finding nearby screenshots that fit together…"
+            owner.preparationStatus = "Preparing screenshots for stitching…"
 
             let (progressStream, progressContinuation) = AsyncStream<StitchProgress>.makeStream()
             let progressTask = Task { @MainActor [weak self] in
                 for await progress in progressStream {
                     guard let self else { return }
-                    preparationStatus = progress.stage == .registering
-                        ? "Comparing nearby screenshots…"
-                        : self.preparationStatus(for: progress)
+                    preparationStatus = self.preparationStatus(for: progress)
                 }
             }
             var importedCandidates: [SourceImage] = []
@@ -309,8 +535,21 @@ final class ContinuoViewModel {
                 try Task.checkCancellation()
 
                 let candidates = importedCandidates
+                let candidateMetadata = candidates.compactMap { source -> AutomaticScreenshotCandidate? in
+                    guard let identifier = source.sourceIdentifier else { return nil }
+                    return AutomaticScreenshotCandidate(
+                        identifier: identifier,
+                        captureDate: source.captureDate,
+                        pixelSize: source.pixelSize
+                    )
+                }
+                let prioritizedCandidateIDs = await intelligenceAdvisor
+                    .prioritizedCandidateIDs(candidateMetadata)
                 let selection = try await Task.detached(priority: .userInitiated) {
-                    try await builder.select(from: candidates) { progress in
+                    try await builder.select(
+                        from: candidates,
+                        prioritizedCandidateIDs: prioritizedCandidateIDs
+                    ) { progress in
                         progressContinuation.yield(progress)
                     }
                 }.value
@@ -327,12 +566,13 @@ final class ContinuoViewModel {
                 let previousSources = sources
                 sources = fullResolutionSources
                 removeTemporaryWorkingCopies(previousSources)
-                resetResult(cancelCurrentTask: false)
+                resetResult(cancelCurrentTask: false, schedulePreparation: false)
+                retainPreparedMapping(selection.joins, for: fullResolutionSources)
                 preparationStatus = nil
                 state = .idle
                 processingTask = nil
                 logger.info(
-                    "Automatically selected \(selection.sources.count) screenshot(s) from \(importedCandidates.count) recent candidate(s); sequence_score=\(selection.score, privacy: .public)."
+                    "Automatically selected \(selection.sources.count) screenshot(s) from \(importedCandidates.count) recent candidate(s) using \(mode.rawValue, privacy: .public); sequence_score=\(selection.score, privacy: .public)."
                 )
             } catch let error as ContinuoError {
                 guard let self, !Task.isCancelled else { return }
@@ -653,6 +893,39 @@ final class ContinuoViewModel {
         }
     }
 
+    func deleteHistoryStitch(id: UUID, scope: HistoryDeletionScope) async -> String? {
+        guard let index = completedStitches.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+
+        let store = historyImageStore
+        do {
+            if scope == .everywhere || historyStorageLocation == .onThisDevice {
+                try await Task.detached(priority: .utility) {
+                    try store.deleteHistory(id: id)
+                }.value
+            }
+
+            var locallyDeleted = Self.locallyDeletedHistoryIDs()
+            switch scope {
+            case .currentDevice:
+                locallyDeleted.insert(id)
+            case .everywhere:
+                locallyDeleted.remove(id)
+            }
+            Self.setLocallyDeletedHistoryIDs(locallyDeleted)
+            completedStitches.remove(at: index)
+            clearHistoryAssetPreparation(id: id)
+            logger.info(
+                "Deleted completed stitch history \(id.uuidString, privacy: .public) with scope \(String(describing: scope), privacy: .public)."
+            )
+            return nil
+        } catch {
+            logger.error("Could not delete completed stitch history \(id.uuidString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return error.localizedDescription
+        }
+    }
+
     func deleteCompletedStitchSources(id: UUID) async {
         guard let index = completedStitches.firstIndex(where: { $0.id == id }) else {
             return
@@ -710,7 +983,10 @@ final class ContinuoViewModel {
         resetResult(cancelCurrentTask: cancelCurrentTask)
     }
 
-    private func prepareForIncomingSources() -> Task<Void, Never>? {
+    private func prepareForIncomingSources(replacesCurrentSelection: Bool) -> Task<Void, Never>? {
+        guard replacesCurrentSelection || isCurrentPreviewSaved else {
+            return nil
+        }
         resetActiveWorkflow()
         return historyArchiveTask
     }
@@ -860,7 +1136,10 @@ final class ContinuoViewModel {
         sources.filter { !$0.excluded }.map(\.id)
     }
 
-    private func resetResult(cancelCurrentTask: Bool = true) {
+    private func resetResult(
+        cancelCurrentTask: Bool = true,
+        schedulePreparation: Bool = true
+    ) {
         if cancelCurrentTask {
             processingTask?.cancel()
             processingTask = nil
@@ -875,7 +1154,31 @@ final class ContinuoViewModel {
         sourceCleanupError = nil
         preparationStatus = nil
         state = sources.isEmpty ? .idle : .idle
-        scheduleMappingPreparation()
+        if schedulePreparation {
+            scheduleMappingPreparation()
+        }
+    }
+
+    private func retainPreparedMapping(
+        _ joins: [JoinResult],
+        for sources: [SourceImage]
+    ) {
+        invalidatePreparedMapping(clearPairCache: true)
+        let sourceIDs = mappingSourceIDs(for: sources)
+        guard joins.count == max(0, sourceIDs.count - 1) else {
+            scheduleMappingPreparation()
+            return
+        }
+        preparedMapping = PreparedMapping(sourceIDs: sourceIDs, joins: joins)
+        for join in joins {
+            preparedJoinsByPair[MappingPairKey(
+                from: join.fromSourceID,
+                to: join.toSourceID
+            )] = join
+        }
+        logger.info(
+            "Retained \(joins.count) automatic-selection mapping join(s) for immediate stitching."
+        )
     }
 
     private func showError(_ error: Error) {
@@ -889,13 +1192,7 @@ final class ContinuoViewModel {
         if progress.message.localizedCaseInsensitiveContains("Downloading") {
             return "Fetching the pixels that were hiding in iCloud…"
         }
-        if progress.total > 0, progress.completed >= progress.total {
-            return "Putting the screenshots in the order you picked…"
-        }
-        if progress.completed.isMultiple(of: 2) {
-            return "Waking up the screenshots…"
-        }
-        return "Making sure every pixel knows where it belongs…"
+        return "Preparing screenshots for stitching…"
     }
 
     private func log(error: ContinuoError, prefix: String) {

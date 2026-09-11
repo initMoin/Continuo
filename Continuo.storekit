@@ -1,0 +1,56 @@
+{
+  "configVersion": 1,
+  "products": [
+    {
+      "displayPrice": "2.99",
+      "familyShareable": false,
+      "internalID": "1000000001",
+      "localizations": [
+        {
+          "description": "An optional tip to support Continuo development.",
+          "displayName": "Lemon Cookie",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "support.lemon-cookie",
+      "referenceName": "Lemon Cookie",
+      "type": "Consumable"
+    },
+    {
+      "displayPrice": "4.99",
+      "familyShareable": false,
+      "internalID": "1000000002",
+      "localizations": [
+        {
+          "description": "An optional tip to support Continuo development.",
+          "displayName": "Caramel Latte",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "support.caramel-latte",
+      "referenceName": "Caramel Latte",
+      "type": "Consumable"
+    },
+    {
+      "displayPrice": "9.99",
+      "familyShareable": false,
+      "internalID": "1000000003",
+      "localizations": [
+        {
+          "description": "An optional tip to support Continuo development.",
+          "displayName": "Philly Cheesesteak",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "support.philly-cheesesteak",
+      "referenceName": "Philly Cheesesteak",
+      "type": "Consumable"
+    }
+  ],
+  "settings": {
+    "_applicationInternalID": "0",
+    "_storefront": "USA",
+    "inAppPurchaseVerification": "Enabled"
+  },
+  "version": "1.0"
+}

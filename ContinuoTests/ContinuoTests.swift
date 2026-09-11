@@ -6,6 +6,17 @@ import UniformTypeIdentifiers
 @testable import Continuo
 
 final class ContinuoTests: XCTestCase {
+    func testSupportProductIDsRemainStable() {
+        XCTAssertEqual(
+            SupportProduct.allCases.map(\.rawValue),
+            [
+                "support.lemon-cookie",
+                "support.caramel-latte",
+                "support.philly-cheesesteak"
+            ]
+        )
+    }
+
     func testNormalizationPreservesFullResolutionAndNormalizesOrientation() throws {
         let image = try XCTUnwrap(makeTestImage(width: 80, rows: (0..<160).map { Float($0) / 160.0 }))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("continuo-normalization-\(UUID().uuidString).png")
@@ -94,6 +105,35 @@ final class ContinuoTests: XCTestCase {
         XCTAssertTrue(imported.allSatisfy { $0.localURL != $0.originalSourceURL })
     }
 
+    @MainActor
+    func testImportingAdditionalFilesAppendsToUnsavedSelection() throws {
+        let firstURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-append-first-\(UUID().uuidString).png")
+        let secondURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-append-second-\(UUID().uuidString).png")
+        let historyRootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-append-history-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: firstURL)
+            try? FileManager.default.removeItem(at: secondURL)
+            try? FileManager.default.removeItem(at: historyRootURL)
+        }
+
+        let image = try XCTUnwrap(makeTestImage(width: 4, rows: [0.2, 0.8]))
+        try writePNG(image, to: firstURL)
+        try writePNG(image, to: secondURL)
+
+        let viewModel = ContinuoViewModel(
+            historyImageStore: HistoryImageStore(directoryURL: historyRootURL)
+        )
+        viewModel.importFiles([firstURL])
+        viewModel.importFiles([secondURL])
+
+        XCTAssertEqual(viewModel.sources.count, 2)
+        XCTAssertEqual(viewModel.sources.map(\.originalSourceURL), [firstURL, secondURL])
+        viewModel.clearSources()
+    }
+
     func testAutomaticScreenshotSelectorPrefersLongestCompatibleChronologicalPath() {
         let baseDate = Date(timeIntervalSince1970: 1_000)
         let first = makeSequenceSource("first", date: baseDate)
@@ -116,6 +156,7 @@ final class ContinuoTests: XCTestCase {
 
         XCTAssertEqual(selection?.sources.map(\.filename), ["first", "second", "unrelated", "fourth", "fifth"])
         XCTAssertEqual(selection?.joinCount, 4)
+        XCTAssertEqual(selection?.joins.map(\.id), joins.map(\.id))
     }
 
     func testAutomaticScreenshotSelectorDoesNotBridgeLargeCreationDateGaps() {
@@ -155,6 +196,7 @@ final class ContinuoTests: XCTestCase {
 
         XCTAssertEqual(selection?.sources.map(\.filename), ["top", "middle", "bottom"])
         XCTAssertEqual(selection?.joinCount, 2)
+        XCTAssertEqual(selection?.joins.map(\.fromSourceID), [top.id, middle.id])
     }
 
     func testAutomaticScreenshotSessionSelectorUsesNewestBoundedCompatibleSession() {
@@ -335,6 +377,22 @@ final class ContinuoTests: XCTestCase {
         XCTAssertGreaterThan(result.diagnostics.elapsedMilliseconds, 0)
     }
 
+    func testVerticalRegistrationSupportsLandscapeSources() async throws {
+        let width = 160
+        let firstRows = variedRows(start: 0, count: 100)
+        let secondRows = variedRows(start: 40, count: 100)
+        let firstImage = try XCTUnwrap(makeTestImage(width: width, rows: firstRows))
+        let secondImage = try XCTUnwrap(makeTestImage(width: width, rows: secondRows))
+        let first = makeNormalizedImage(id: UUID(), image: firstImage, rows: firstRows)
+        let second = makeNormalizedImage(id: UUID(), image: secondImage, rows: secondRows)
+
+        let result = try await PairwiseRegistrar().register(from: first, to: second)
+
+        XCTAssertTrue(result.confidence.isAccepted, "diagnostics=\(result.diagnostics)")
+        XCTAssertLessThanOrEqual(abs(result.transform.ty - 40), 2)
+        XCTAssertLessThan(abs(result.transform.tx), 2)
+    }
+
     func testRegistrationConvertsBoundedMatchingTranslationToOutputPixels() async throws {
         let width = 16
         let firstRows = variedRows(start: 0, count: 100)
@@ -402,6 +460,97 @@ final class ContinuoTests: XCTestCase {
         XCTAssertEqual(joins[0].id, reused.id)
         XCTAssertEqual(joins[1].fromSourceID, sources[1].id)
         XCTAssertEqual(joins[1].toSourceID, sources[2].id)
+    }
+
+    func testEnginePrecomputesVerticalJoinsForLandscapeSources() async throws {
+        let width = 160
+        let firstImage = try XCTUnwrap(
+            makeTestImage(width: width, rows: variedRows(start: 0, count: 100))
+        )
+        let secondImage = try XCTUnwrap(
+            makeTestImage(width: width, rows: variedRows(start: 40, count: 100))
+        )
+        let urls = [
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuo-landscape-vertical-first-\(UUID().uuidString).png"),
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuo-landscape-vertical-second-\(UUID().uuidString).png")
+        ]
+        defer {
+            urls.forEach { try? FileManager.default.removeItem(at: $0) }
+        }
+        try writePNG(firstImage, to: urls[0])
+        try writePNG(secondImage, to: urls[1])
+
+        let sources = urls.map { SourceImage(localURL: $0, filename: $0.lastPathComponent) }
+        let joins = try await StitchEngine(direction: .vertical).precomputeJoins(for: sources)
+
+        XCTAssertEqual(joins.count, 1)
+        XCTAssertTrue(joins[0].confidence.isAccepted, "diagnostics=\(joins[0].diagnostics)")
+        XCTAssertLessThanOrEqual(abs(joins[0].transform.ty - 40), 3)
+    }
+
+    func testDirectionalAdapterSwapsMatchingGeometryForHorizontalStacking() throws {
+        let image = try XCTUnwrap(makeTestImage(width: 12, rows: variedRows(start: 0, count: 7)))
+        let normalized = makeNormalizedImage(
+            id: UUID(),
+            image: image,
+            rows: variedRows(start: 0, count: 7),
+            width: 12
+        )
+
+        let adapted = DirectionalImageAdapter.matchingImage(normalized, for: .horizontal)
+
+        XCTAssertEqual(adapted.matchingImage.width, image.height)
+        XCTAssertEqual(adapted.matchingImage.height, image.width)
+        XCTAssertEqual(adapted.matchingRepresentation.width, normalized.matchingRepresentation.height)
+        XCTAssertEqual(adapted.matchingRepresentation.height, normalized.matchingRepresentation.width)
+        XCTAssertEqual(adapted.workingPixelSize, PixelSize(width: normalized.workingPixelSize.height, height: normalized.workingPixelSize.width))
+    }
+
+    func testEnginePrecomputesHorizontalJoinsForSideBySideSources() async throws {
+        let width = 100
+        let height = 16
+        let shift = 40
+        let globalColumns = variedRows(start: 0, count: width + shift)
+        let firstValues = (0..<height).map { row in
+            (0..<width).map { column in
+                globalColumns[column] * 0.7 + Float((row * 11) % 13) / 40
+            }
+        }
+        let secondValues = (0..<height).map { row in
+            (0..<width).map { column in
+                globalColumns[column + shift] * 0.7 + Float((row * 11) % 13) / 40
+            }
+        }
+        let firstImage = try XCTUnwrap(makeTestImage(values: firstValues))
+        let secondImage = try XCTUnwrap(makeTestImage(values: secondValues))
+        let urls = [
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuo-horizontal-first-\(UUID().uuidString).png"),
+            FileManager.default.temporaryDirectory
+                .appendingPathComponent("continuo-horizontal-second-\(UUID().uuidString).png")
+        ]
+        defer { urls.forEach { try? FileManager.default.removeItem(at: $0) } }
+        try writePNG(firstImage, to: urls[0])
+        try writePNG(secondImage, to: urls[1])
+
+        let sources = urls.map { SourceImage(localURL: $0, filename: $0.lastPathComponent) }
+        let joins = try await StitchEngine(direction: .horizontal).precomputeJoins(for: sources)
+
+        XCTAssertEqual(joins.count, 1)
+        XCTAssertTrue(joins[0].confidence.isAccepted, "diagnostics=\(joins[0].diagnostics)")
+        XCTAssertLessThanOrEqual(abs(joins[0].transform.ty - Double(shift)), 5)
+        XCTAssertLessThan(abs(joins[0].transform.tx), 5)
+
+        let preview = try await StitchEngine(direction: .horizontal).stitch(
+            sources: sources,
+            precomputedJoins: joins
+        )
+        XCTAssertEqual(preview.pixelSize, PixelSize(width: width + shift, height: height))
+        let outputRows = readRedRows(from: preview.image)
+        XCTAssertGreaterThan(outputRows.first?.reduce(0, max) ?? 0, 0)
+        XCTAssertGreaterThan(outputRows.last?.reduce(0, max) ?? 0, 0)
     }
 
     func testJoinDiagnosticsDecodesLegacyPayloadWithoutTiming() throws {
@@ -1107,11 +1256,40 @@ final class ContinuoTests: XCTestCase {
         consumedStitch.fullResolutionURL = nil
         try store.update(consumedStitch)
 
-        XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
         let reloaded = try store.load()
         XCTAssertEqual(reloaded.count, 1)
         XCTAssertNil(reloaded[0].fullResolutionURL)
         XCTAssertEqual(reloaded[0].thumbnail.width, loaded[0].thumbnail.width)
+    }
+
+    func testHistoryImageStoreDeletesEveryHistoryArtifact() throws {
+        let rootURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("continuo-history-delete-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: rootURL) }
+
+        let image = try XCTUnwrap(makeTestImage(width: 8, rows: [0.1, 0.3, 0.6, 0.9]))
+        let store = HistoryImageStore(directoryURL: rootURL)
+        let stitchID = UUID()
+        let asset = try store.archive(
+            image: image,
+            pixelSize: PixelSize(width: image.width, height: image.height),
+            id: stitchID
+        )
+        let thumbnailURL = rootURL
+            .appendingPathComponent("Thumbnails", isDirectory: true)
+            .appendingPathComponent("\(stitchID.uuidString).thumbnail.png")
+        let metadataURL = rootURL
+            .appendingPathComponent("Metadata", isDirectory: true)
+            .appendingPathComponent(stitchID.uuidString)
+            .appendingPathExtension("json")
+
+        try store.deleteHistory(id: stitchID)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnailURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: metadataURL.path))
+        XCTAssertTrue(try store.load().isEmpty)
     }
 
     func testHistoryImageStoreMovesFilesBetweenLocations() throws {
@@ -1140,7 +1318,7 @@ final class ContinuoTests: XCTestCase {
         let progressValues = progress.values
         let loadedDestination = try destinationStore.load()
         XCTAssertEqual(loadedDestination.count, 1)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: asset.fullResolutionURL.path))
         XCTAssertTrue(loadedDestination[0].fullResolutionURL?.path.contains("/Images/") == true)
         XCTAssertEqual(result.copiedFileCount, 3)
         XCTAssertTrue(progressValues.contains { $0.phase == .preparing })

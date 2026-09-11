@@ -265,7 +265,7 @@ public struct ImageNormalizationConfiguration: Sendable, Equatable {
     public var matchingMaximumPixelSize: Int
 
     public init(matchingMaximumPixelSize: Int = 1_280) {
-        self.matchingMaximumPixelSize = max(320, matchingMaximumPixelSize)
+        self.matchingMaximumPixelSize = max(64, matchingMaximumPixelSize)
     }
 }
 

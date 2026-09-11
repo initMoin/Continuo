@@ -51,7 +51,6 @@ public struct AutomaticScreenshotImporter {
                     total: assets.count,
                     progress: progress
                 )
-                let filename = resourceFilename(for: asset) ?? "Screenshot-\(index + 1).png"
                 let localURL = destination
                     .appendingPathComponent("Auto-\(UUID().uuidString)")
                     .appendingPathExtension("png")
@@ -64,7 +63,7 @@ public struct AutomaticScreenshotImporter {
                     pixelSize: PixelSize(width: asset.pixelWidth, height: asset.pixelHeight),
                     orientation: .up,
                     captureDate: asset.creationDate,
-                    filename: filename
+                    filename: nil
                 ))
 
                 progress(StitchProgress(
@@ -252,7 +251,7 @@ public struct AutomaticScreenshotImporter {
         progress: @escaping @Sendable (StitchProgress) -> Void
     ) async throws -> Data {
         let options = PHImageRequestOptions()
-        options.deliveryMode = .highQualityFormat
+        options.deliveryMode = .opportunistic
         options.isNetworkAccessAllowed = true
         options.isSynchronous = false
         options.resizeMode = .fast

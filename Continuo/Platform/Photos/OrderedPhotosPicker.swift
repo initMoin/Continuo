@@ -12,6 +12,7 @@ struct OrderedPhotosPicker: View {
             .ignoresSafeArea()
 #elseif os(macOS)
         OrderedPhotosPickerView(onComplete: onComplete)
+            .frame(minWidth: 800, idealWidth: 1000, minHeight: 600, idealHeight: 720)
 #endif
     }
 }

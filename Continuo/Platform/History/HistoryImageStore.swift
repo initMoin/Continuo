@@ -28,6 +28,49 @@ enum HistoryStorageLocation: String, Codable, CaseIterable, Identifiable, Sendab
     }
 }
 
+enum HistoryDeletionScope: Equatable, Sendable {
+    case currentDevice
+    case everywhere
+}
+
+enum HistorySyncState: Equatable, Sendable {
+    case localOnly
+    case syncing
+    case upToDate
+    case unavailable
+    case failed
+
+    var title: String {
+        switch self {
+        case .localOnly:
+            "On this device"
+        case .syncing:
+            "Syncing with iCloud"
+        case .upToDate:
+            "Up to date"
+        case .unavailable:
+            "iCloud unavailable"
+        case .failed:
+            "Sync needs attention"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .localOnly:
+            "iphone"
+        case .syncing:
+            "arrow.triangle.2.circlepath.icloud"
+        case .upToDate:
+            "checkmark.icloud"
+        case .unavailable:
+            "exclamationmark.icloud"
+        case .failed:
+            "exclamationmark.triangle"
+        }
+    }
+}
+
 enum HistoryImageStoreError: LocalizedError, Sendable {
     case directoryCreationFailed(String)
     case encodingFailed
@@ -359,6 +402,23 @@ struct HistoryImageStore: @unchecked Sendable {
             fullResolutionFilename: stitch.fullResolutionURL?.lastPathComponent,
             thumbnailFilename: thumbnailURL(for: stitch.id).lastPathComponent
         ))
+    }
+
+    /// Removes every persisted artifact for one history entry. When the store
+    /// is backed by iCloud Drive, deleting these files propagates the deletion
+    /// to the user's other devices through the ubiquitous container.
+    func deleteHistory(id: UUID) throws {
+        guard isAvailable else {
+            throw HistoryImageStoreError.iCloudUnavailable
+        }
+
+        for url in [
+            fullResolutionURL(for: id),
+            thumbnailURL(for: id),
+            metadataURL(for: id)
+        ] where fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
     }
 
     func remove(_ url: URL) {

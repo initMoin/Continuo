@@ -1,4 +1,8 @@
-# Source Available Proprietary License
+<p align="center">
+  <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
+</p>
+
+<h1 align="center">Source Available Proprietary License</h1>
 
 Copyright (c) 2026 Moinuddin Ahmad. All Rights Reserved.
 
@@ -50,3 +54,11 @@ All intellectual property rights, title, and interest in the Software remain sol
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THIS SOFTWARE.
 
 For permissions extending beyond this license, or to discuss potential partnerships, please reach out via iamshift.dev.
+
+<p align="center">
+  <a href="https://iamshift.dev">
+    <img src="assets/branding/iamshift-logo.png" alt="iamshift logo" width="96">
+    <br>
+    <img src="assets/branding/moin.shift.png" alt="moin.shift() logo" width="180">
+  </a>
+</p>
