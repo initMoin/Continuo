@@ -53,6 +53,11 @@ final class ContinuoUITests: XCTestCase {
 
         let moreOptions = app.buttons["More options"]
         XCTAssertTrue(moreOptions.waitForExistence(timeout: 8), "More options must be available for screenshot capture.")
+        let moreOptionsHittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hittable == true"),
+            object: moreOptions
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [moreOptionsHittable], timeout: 5), .completed)
         moreOptions.tap()
         capture("02-more-options", screen: XCUIScreen.main)
 
@@ -84,6 +89,12 @@ final class ContinuoUITests: XCTestCase {
         let finish = app.buttons["Finish onboarding"]
         XCTAssertTrue(finish.waitForExistence(timeout: 2))
         finish.tap()
+
+        let onboardingDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: finish
+        )
+        _ = XCTWaiter.wait(for: [onboardingDismissed], timeout: 5)
     }
 
     @MainActor
