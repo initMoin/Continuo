@@ -6,6 +6,7 @@
 //
 
 import XCTest
+import Foundation
 
 final class ContinuoUITests: XCTestCase {
 
@@ -39,5 +40,70 @@ final class ContinuoUITests: XCTestCase {
         measure(metrics: [XCTApplicationLaunchMetric()]) {
             XCUIApplication().launch()
         }
+    }
+
+    @MainActor
+    func testCaptureAppStoreViews() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--capture-app-store-views"]
+        app.launch()
+        dismissOnboardingIfNeeded(in: app)
+
+        try capture("01-workflow", screen: XCUIScreen.main)
+
+        let moreOptions = app.buttons["More options"]
+        XCTAssertTrue(moreOptions.waitForExistence(timeout: 8), "More options must be available for screenshot capture.")
+        moreOptions.tap()
+        try capture("02-more-options", screen: XCUIScreen.main)
+
+        let history = app.buttons["History & Sync"]
+        XCTAssertTrue(history.waitForExistence(timeout: 5), "History & Sync must be available in the menu.")
+        history.tap()
+        XCTAssertTrue(app.navigationBars["History & Sync"].waitForExistence(timeout: 5), "History & Sync must open.")
+        try capture("03-history-sync", screen: XCUIScreen.main)
+        dismissSheet(in: app)
+
+        moreOptions.tap()
+        let intelligence = app.buttons["Intelligence"]
+        XCTAssertTrue(intelligence.waitForExistence(timeout: 5), "Intelligence must be available in the menu.")
+        intelligence.tap()
+        XCTAssertTrue(app.navigationBars["Intelligence"].waitForExistence(timeout: 5), "Intelligence must open.")
+        try capture("04-intelligence", screen: XCUIScreen.main)
+        dismissSheet(in: app)
+
+        moreOptions.tap()
+        let about = app.buttons["About Continuo"]
+        XCTAssertTrue(about.waitForExistence(timeout: 5), "About Continuo must be available in the menu.")
+        about.tap()
+        XCTAssertTrue(app.navigationBars["About"].waitForExistence(timeout: 5), "About must open.")
+        try capture("05-about", screen: XCUIScreen.main)
+    }
+
+    @MainActor
+    private func dismissOnboardingIfNeeded(in app: XCUIApplication) {
+        let next = app.buttons["Next onboarding page"]
+        guard next.waitForExistence(timeout: 2) else { return }
+
+        next.tap()
+        XCTAssertTrue(next.waitForExistence(timeout: 2))
+        next.tap()
+
+        let finish = app.buttons["Finish onboarding"]
+        XCTAssertTrue(finish.waitForExistence(timeout: 2))
+        finish.tap()
+    }
+
+    @MainActor
+    private func dismissSheet(in app: XCUIApplication) {
+        let done = app.buttons["Done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "Presented view must expose a Done button.")
+        done.tap()
+    }
+
+    private func capture(_ name: String, screen: XCUIScreen) {
+        let attachment = XCTAttachment(screenshot: screen.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 }

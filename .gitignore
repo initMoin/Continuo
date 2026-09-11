@@ -23,3 +23,6 @@ build/
 
 # Standalone documentation experiments
 Continuo-Markdown-Render-Test/
+
+# App Store screenshot exports
+AppStoreScreenshots/
