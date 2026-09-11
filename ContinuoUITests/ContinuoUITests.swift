@@ -49,19 +49,19 @@ final class ContinuoUITests: XCTestCase {
         app.launch()
         dismissOnboardingIfNeeded(in: app)
 
-        try capture("01-workflow", screen: XCUIScreen.main)
+        capture("01-workflow", screen: XCUIScreen.main)
 
         let moreOptions = app.buttons["More options"]
         XCTAssertTrue(moreOptions.waitForExistence(timeout: 8), "More options must be available for screenshot capture.")
         moreOptions.tap()
-        try capture("02-more-options", screen: XCUIScreen.main)
+        capture("02-more-options", screen: XCUIScreen.main)
 
         moreOptions.tap()
         let intelligence = app.buttons["Intelligence"]
         XCTAssertTrue(intelligence.waitForExistence(timeout: 5), "Intelligence must be available in the menu.")
         intelligence.tap()
         XCTAssertTrue(app.navigationBars["Intelligence"].waitForExistence(timeout: 5), "Intelligence must open.")
-        try capture("03-intelligence", screen: XCUIScreen.main)
+        capture("03-intelligence", screen: XCUIScreen.main)
         dismissSheet(in: app)
 
         moreOptions.tap()
@@ -69,7 +69,7 @@ final class ContinuoUITests: XCTestCase {
         XCTAssertTrue(about.waitForExistence(timeout: 5), "About Continuo must be available in the menu.")
         about.tap()
         XCTAssertTrue(app.navigationBars["About"].waitForExistence(timeout: 5), "About must open.")
-        try capture("04-about", screen: XCUIScreen.main)
+        capture("04-about", screen: XCUIScreen.main)
     }
 
     @MainActor
@@ -93,6 +93,7 @@ final class ContinuoUITests: XCTestCase {
         done.tap()
     }
 
+    @MainActor
     private func capture(_ name: String, screen: XCUIScreen) {
         let attachment = XCTAttachment(screenshot: screen.screenshot())
         attachment.name = name
