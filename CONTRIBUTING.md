@@ -40,9 +40,9 @@ Scripts/capture-app-store-screenshots.sh
 ```
 
 The runner writes separate device folders under `AppStoreScreenshots/` and
-captures the workflow, action menu, History & Sync, Intelligence, and About
-views. The PNGs are exported from XCTest result attachments and are ignored by
-Git. Mac capture requires an available macOS UI automation session.
+captures the workflow, action menu, Intelligence, and About views. The PNGs
+are exported from XCTest result attachments and are ignored by Git. Mac
+capture requires an available macOS UI automation session.
 
 Build the Mac target separately:
 

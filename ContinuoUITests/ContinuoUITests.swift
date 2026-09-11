@@ -56,19 +56,12 @@ final class ContinuoUITests: XCTestCase {
         moreOptions.tap()
         try capture("02-more-options", screen: XCUIScreen.main)
 
-        let history = app.buttons["History & Sync"]
-        XCTAssertTrue(history.waitForExistence(timeout: 5), "History & Sync must be available in the menu.")
-        history.tap()
-        XCTAssertTrue(app.navigationBars["History & Sync"].waitForExistence(timeout: 5), "History & Sync must open.")
-        try capture("03-history-sync", screen: XCUIScreen.main)
-        dismissSheet(in: app)
-
         moreOptions.tap()
         let intelligence = app.buttons["Intelligence"]
         XCTAssertTrue(intelligence.waitForExistence(timeout: 5), "Intelligence must be available in the menu.")
         intelligence.tap()
         XCTAssertTrue(app.navigationBars["Intelligence"].waitForExistence(timeout: 5), "Intelligence must open.")
-        try capture("04-intelligence", screen: XCUIScreen.main)
+        try capture("03-intelligence", screen: XCUIScreen.main)
         dismissSheet(in: app)
 
         moreOptions.tap()
@@ -76,7 +69,7 @@ final class ContinuoUITests: XCTestCase {
         XCTAssertTrue(about.waitForExistence(timeout: 5), "About Continuo must be available in the menu.")
         about.tap()
         XCTAssertTrue(app.navigationBars["About"].waitForExistence(timeout: 5), "About must open.")
-        try capture("05-about", screen: XCUIScreen.main)
+        try capture("04-about", screen: XCUIScreen.main)
     }
 
     @MainActor

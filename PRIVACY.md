@@ -1,3 +1,9 @@
+---
+layout: default
+title: Continuo Privacy Policy
+permalink: /privacy/
+---
+
 <p align="center">
   <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
 </p>
@@ -11,7 +17,7 @@ This Privacy Policy explains how Moinuddin Ahmad, doing business as **moin.shift
 
 Continuo is designed to process screenshots on your device. We do not require an account, and we do not operate a service that uploads your screenshot contents for stitching.
 
-> **Important:** Before publishing this policy, replace the bracketed business and jurisdiction details below with your current legal information. This policy is information about the App, not legal advice.
+> This policy describes how Continuo handles information. It is not legal advice; review it with counsel for the markets where you distribute the App.
 
 ## 1. Information we handle
 
@@ -65,7 +71,7 @@ Apple provides Photos, Files, iCloud, Foundation Models, Vision, App Store, and 
 
 Local data remains until you delete it, remove the App, or the operating system removes it. iCloud data remains according to your actions, Apple's service operation, and available storage. Support correspondence is retained only as long as reasonably needed for the request, security, accounting, or legal obligations. We do not have a server-side copy of screenshots that you process only in the App.
 
-You may delete local history in the App, manage Photos and iCloud data through Apple's controls, and request deletion of support correspondence by emailing [**hello@iamshift.dev**](mailto:hello@iamshift.dev). We may retain information where required by law or reasonably necessary to resolve disputes and prevent abuse.
+You may delete local history in the App, manage Photos and iCloud data through Apple's controls, and request deletion of support correspondence by emailing [**support@iamshift.dev**](mailto:support@iamshift.dev). We may retain information where required by law or reasonably necessary to resolve disputes and prevent abuse.
 
 ## 6. Security
 
@@ -89,7 +95,7 @@ We may update this Policy as the App or law changes. We will post the updated ve
 
 ## 11. Contact
 
-**Privacy and general contact:** [hello@iamshift.dev](mailto:hello@iamshift.dev)
+**Privacy and general contact:** [support@iamshift.dev](mailto:support@iamshift.dev)
 **Website:** https://iamshift.dev
 **Legal operator:** Moinuddin Ahmad / moin.shift()
 
