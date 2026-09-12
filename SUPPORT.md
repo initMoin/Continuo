@@ -2,7 +2,7 @@
   <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
 </p>
 
-<h1 align="center">Continuo Support Policy</h1>
+<h1 align="center">Support Policy</h1>
 
 **Effective date:** September 10, 2026
 
@@ -10,8 +10,9 @@ This Support Policy describes the support available for the Continuo app for iPh
 
 ## Contact support
 
-Email [**support@iamshift.dev**](mailto:support@iamshift.dev). Please include:
+Email [**support@iamshift.dev**](mailto:support@iamshift.dev).
 
+Please include:
 - a short description of what happened and the result you expected;
 - Continuo version, device model, operating system, and (if relevant) whether the source was Photos or Files;
 - steps to reproduce and any visible error message; and
@@ -63,7 +64,8 @@ We may update this policy as our support channels or the App change. The current
 ## Contact
 
 [support@iamshift.dev](mailto:support@iamshift.dev)
-https://iamshift.dev
+
+[moin.shift()](https://iamshift.dev)
 
 <p align="center">
   <a href="https://iamshift.dev">
