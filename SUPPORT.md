@@ -55,7 +55,7 @@ Continuo is an image utility, not a backup, records-management, medical, legal, 
 
 ## Abuse and urgent reports
 
-Do not use support to send unlawful, threatening, abusive, or confidential third-party information. Report security vulnerabilities privately to [**support@iamshift.dev**](mailto:support@iamshift.dev) with “Security” in the subject; do not open a public issue containing an exploit or private data. For an immediate threat to safety, contact local emergency services.
+Do not use support to send unlawful, threatening, abusive, or confidential third-party information. Report security vulnerabilities privately to [**support@iamshift.dev**](mailto:support@iamshift.dev) with “Security” in the subject; do not open a public issue containing an exploit or private data.
 
 ## Changes
 
