@@ -1,9 +1,3 @@
----
-layout: default
-title: Continuo Terms of Service
-permalink: /terms/
----
-
 <p align="center">
   <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
 </p>
@@ -75,7 +69,7 @@ We may update these Terms by posting a revised version with a new “Last update
 
 ## 14. Governing law and disputes
 
-These Terms are governed by the laws of **[insert state/country]**, without regard to conflict-of-law rules. Courts located in **[insert county/state/country]** will have exclusive jurisdiction, unless applicable consumer law gives you a right to bring a claim elsewhere. If you are a consumer, nothing in this section removes mandatory protections or dispute rights that cannot be waived where you live.
+These Terms are governed by the laws of the State of Texas and the United States, without regard to conflict-of-law rules. State and federal courts located in Dallas County, Dallas, Texas will have exclusive jurisdiction, unless applicable consumer law gives you a right to bring a claim elsewhere. If you are a consumer, nothing in this section removes mandatory protections or dispute rights that cannot be waived where you live.
 
 ## 15. General terms
 

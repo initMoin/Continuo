@@ -120,7 +120,8 @@ refreshed when the app becomes active; full-resolution PNGs remain on-demand
 assets and are downloaded only when exported.
 
 See the [Privacy Policy](PRIVACY.md), [Support Policy](SUPPORT.md), and [Terms
-of Service](TERMS.md) for the App's current policies.
+of Service](TERMS.md) for the App's current policies, or open the [Legal &
+Support index](LEGAL.md) for the public links used by the App Store listing.
 
 ## Support purchases
 

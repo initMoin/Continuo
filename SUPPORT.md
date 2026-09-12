@@ -1,9 +1,3 @@
----
-layout: default
-title: Continuo Support
-permalink: /support/
----
-
 <p align="center">
   <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
 </p>

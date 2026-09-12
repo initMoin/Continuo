@@ -32,13 +32,11 @@ Copyright 2026 Moinuddin Ahmad
 
 **Privacy Policy URL**
 
-Publish the repository's `PRIVACY.md` on the GitHub Pages site, then enter the final public URL here:
-
-`https://initmoin.github.io/Continuo/privacy/`
+`https://github.com/initMoin/Continuo/blob/main/PRIVACY.md`
 
 **Support URL**
 
-`https://initmoin.github.io/Continuo/support/`
+`https://github.com/initMoin/Continuo/blob/main/SUPPORT.md`
 
 **Marketing URL**
 
@@ -119,7 +117,7 @@ Use the same story order for iPhone, iPad, and Mac. Keep the copy short and plac
 
    Supporting line: `Built to get out of your way.`
 
-The capture harness is `Scripts/capture-app-store-screenshots.sh`. It exports the five views above for iPhone and iPad and attempts the same Mac run. Capture Mac screenshots on a host with a functioning XCTest UI automation session.
+The capture harness is `Scripts/capture-app-store-screenshots.sh`. It exports the four views above for iPhone and iPad and attempts the same Mac run. Capture Mac screenshots on a host with a functioning XCTest UI automation session.
 
 ## App Review Information
 
@@ -176,11 +174,11 @@ Do not mention prices in the product description; App Store Connect and the App 
 
 ## Legal and Support Links
 
-Publish these files on the GitHub Pages site before submission:
+Use the repository's rendered blob pages as the public legal and support links:
 
-- `PRIVACY.md` -> `https://initmoin.github.io/Continuo/privacy/`
-- `TERMS.md` -> `https://initmoin.github.io/Continuo/terms/`
-- `SUPPORT.md` -> `https://initmoin.github.io/Continuo/support/`
+- `PRIVACY.md` -> `https://github.com/initMoin/Continuo/blob/main/PRIVACY.md`
+- `TERMS.md` -> `https://github.com/initMoin/Continuo/blob/main/TERMS.md`
+- `SUPPORT.md` -> `https://github.com/initMoin/Continuo/blob/main/SUPPORT.md`
 - Email -> `support@iamshift.dev`
 
-Replace the jurisdiction placeholders in Section 14 of `TERMS.md` before submitting the app for review.
+Confirm that the repository is public and that the `main` branch contains the submitted policy versions before entering these URLs in App Store Connect.

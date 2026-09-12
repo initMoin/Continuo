@@ -1,9 +1,3 @@
----
-layout: default
-title: Continuo Privacy Policy
-permalink: /privacy/
----
-
 <p align="center">
   <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
 </p>
