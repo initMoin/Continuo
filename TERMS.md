@@ -2,10 +2,10 @@
   <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
 </p>
 
-<h1 align="center">Continuo Terms of Service</h1>
+<h1 align="center">Terms of Service</h1>
 
 **Effective date:** September 10, 2026
-**Last updated:** September 10, 2026
+**Last updated:** September 12, 2026
 
 These Terms of Service ("Terms") govern your use of the Continuo application for iPhone, iPad, and Mac (the "App") and related documentation and support. The App is provided by Moinuddin Ahmad, doing business as **moin.shift()** ("Continuo," "we," "us," or "our"). By downloading, accessing, or using the App, you agree to these Terms. If you do not agree, do not use the App.
 
@@ -78,8 +78,10 @@ These Terms, together with the Privacy Policy and any terms expressly incorporat
 ## 16. Contact
 
 **Legal operator:** Moinuddin Ahmad / moin.shift()
+
 **Email:** [support@iamshift.dev](mailto:support@iamshift.dev)
-**Website:** https://iamshift.dev
+
+**Website:** [moin.shift()](https://iamshift.dev)
 
 <p align="center">
   <a href="https://iamshift.dev">
