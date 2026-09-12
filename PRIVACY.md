@@ -90,7 +90,9 @@ We may update this Policy as the App or law changes. We will post the updated ve
 ## 11. Contact
 
 **Privacy and general contact:** [support@iamshift.dev](mailto:support@iamshift.dev)
+
 **Website:** https://iamshift.dev
+
 **Legal operator:** Moinuddin Ahmad / moin.shift()
 
 <p align="center">
