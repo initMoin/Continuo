@@ -2,10 +2,10 @@
   <img src="assets/branding/continuo.png" alt="Continuo logo" width="300">
 </p>
 
-<h1 align="center">Continuo Privacy Policy</h1>
+<h1 align="center">Privacy Policy</h1>
 
 **Effective date:** September 10, 2026
-**Last updated:** September 10, 2026
+**Last updated:** September 12, 2026
 
 This Privacy Policy explains how Moinuddin Ahmad, doing business as **moin.shift()** ("Continuo," "we," "us," or "our"), handles information in the Continuo application for iPhone, iPad, and Mac (the "App").
 
