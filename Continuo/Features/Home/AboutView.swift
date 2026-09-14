@@ -19,6 +19,11 @@ struct AboutView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     aboutHero
+                    Text("Stitch the whole story with Continuo")
+                        .font(.custom("Aleo-Italic", size: 17))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
                     aboutSection(
                         title: "Where Continuo came from",
                         text: "There are already many apps in the App Store that connect and stitch screenshots into one. However, either they weren’t automated or they stopped working. I needed it for a problem that kept showing up and bugging me. So I built my own solution and maybe it helps you too."
@@ -33,11 +38,6 @@ struct AboutView: View {
                     )
                     whoAmISection
                     contactLinks
-                    Text("For those moments when one screenshot just doesn't do the trick")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 16)
                 }
                 .frame(maxWidth: horizontalSizeClass == .regular ? 640 : 560)
                 .frame(maxWidth: .infinity)
