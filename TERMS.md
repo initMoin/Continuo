@@ -15,6 +15,10 @@ These Terms of Service ("Terms") govern your use of the Continuo application for
 
 You must be legally able to enter a contract where you live. If you are a minor, use the App only with a parent or guardian's permission. Your use of the App through Apple's App Store is also subject to Apple's Media Services Terms and any applicable Apple usage rules. Apple is not responsible for maintenance or support of the App except as required by law or Apple's applicable terms.
 
+Apple and Apple's subsidiaries are third-party beneficiaries of these Terms. Upon your acceptance of these Terms, Apple has the right to enforce these Terms against you as a third-party beneficiary.
+
+As between Apple and Continuo, Continuo is solely responsible for addressing claims relating to the App, including product liability, legal or regulatory compliance, consumer protection, and third-party intellectual-property infringement.
+
 ## 2. License to use the App
 
 Subject to these Terms, we grant you a limited, personal, non-exclusive, non-transferable, non-sublicensable license to install and use the App on Apple devices you own or control for lawful personal or internal business purposes. We and our licensors retain all rights not expressly granted. Continuo's source repository is governed by the separate [Source Available Proprietary License](LICENSE.md); these Terms do not grant rights to reproduce or redistribute the source code.
@@ -33,7 +37,7 @@ Stitching and the App's alignment intelligence are designed to run on-device. If
 
 ## 5. Optional support purchases
 
-The App is free to use and may offer optional one-time consumable purchases described as support for development. Current prices, taxes, and product availability are shown by Apple at purchase. Apple processes payment and provides the transaction record. Purchases are not required to use the App and do not unlock a promise of particular features, priority support, or a donation tax deduction. Refunds and billing disputes are handled by Apple under its policies and applicable law.
+The App is free to use and may offer optional consumable tip purchases described as support for development. Consumable tips may be purchased more than once and do not unlock features or functionality. Current prices, taxes, and product availability are shown by Apple at purchase. Apple processes payment and provides the transaction record. Purchases are not required to use the App and do not create a promise of particular features, priority support, or a donation tax deduction. Refunds and billing disputes are handled by Apple under its policies and applicable law.
 
 ## 6. Updates and availability
 

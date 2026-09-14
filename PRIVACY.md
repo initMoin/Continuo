@@ -35,6 +35,8 @@ The App offers optional one-time support purchases. Purchases are processed by A
 
 The App may create short-lived, on-device diagnostic logs to explain failures and measure processing steps. Logs may contain technical values such as image dimensions, processing durations, operation types, and generated identifiers. Continuo does not intentionally include screenshot pixels, image contents, or the text visible in screenshots in these logs. Unless you send information to us, we do not receive these logs.
 
+Continuo does not integrate third-party analytics, advertising SDKs, tracking pixels, or Apple's advertising identifier (IDFA).
+
 ### Support communications
 
 If you contact us, we receive the information you choose to provide, such as your email address, device and operating-system details, App version, purchase information, and a description of the issue. We use it to respond, troubleshoot, and keep a record of support requests.
@@ -42,6 +44,8 @@ If you contact us, we receive the information you choose to provide, such as you
 ## 2. Intelligence features
 
 The **Automatic** mode uses deterministic pixel matching on-device. **Vision-assisted** uses Apple's on-device Vision framework as a fallback for ambiguous alignment. **Foundation Models-assisted**, when available, may provide candidate metadata—such as identifiers, capture dates, and pixel dimensions—to Apple's on-device Foundation Models framework. Full-resolution screenshot pixels remain in Continuo and are not sent to a model by the App. Model results are optional hints; deterministic matching remains authoritative.
+
+If the operating system routes a system-level framework request through Apple's Private Cloud Compute or another underlying Apple platform service, that processing is governed by Apple's privacy policy and applicable Apple terms.
 
 ## 3. How we use information
 
