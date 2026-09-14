@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SupportContinuoView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var store = ContinuoSupportStore()
 
     var body: some View {
@@ -91,10 +92,14 @@ struct SupportContinuoView: View {
             }
         } label: {
             HStack(spacing: 14) {
-                Image(systemName: supportProduct.systemImage)
-                    .font(.title3)
-                    .foregroundStyle(ContinuoDesign.logoGreen)
-                    .frame(width: 30)
+                Image(supportProduct.assetName)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .foregroundStyle(colorScheme == .dark ? .white : ContinuoDesign.wordmarkLight)
+                    .frame(width: 38, height: 38)
+                    .padding(5)
+                    .background(ContinuoDesign.logoGreen.opacity(0.16), in: Circle())
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(supportProduct.title)
