@@ -60,6 +60,7 @@ struct AboutView: View {
                 SupportContinuoView()
 #if os(iOS)
                     .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
 #endif
             }
         }
