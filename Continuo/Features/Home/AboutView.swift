@@ -111,7 +111,7 @@ struct AboutView: View {
     }
 
     private var contactLinks: some View {
-        HStack(alignment: .top, spacing: 24) {
+        HStack(alignment: .top, spacing: 12) {
             VStack(spacing: 6) {
                 Link(destination: URL(string: "https://iamshift.dev")!) {
                     aboutSiteLinkLabel {
@@ -135,7 +135,7 @@ struct AboutView: View {
             .frame(maxWidth: .infinity)
 
             supportLink
-                .frame(maxWidth: .infinity)
+                .frame(width: horizontalSizeClass == .compact ? 112 : 150)
         }
         .frame(maxWidth: .infinity)
     }
@@ -172,7 +172,7 @@ struct AboutView: View {
             Text(title)
                 .font(title.contains("@") ? ContinuoDesign.Typography.metadata(size: 12) : .subheadline.weight(.medium))
                 .fontDesign(title.contains("@") ? .monospaced : .rounded)
-                .lineLimit(2)
+                .lineLimit(title.contains("@") ? 1 : 2)
                 .minimumScaleFactor(0.82)
                 .multilineTextAlignment(.leading)
             Spacer(minLength: 0)
@@ -191,7 +191,7 @@ struct AboutView: View {
             icon()
                 .frame(width: 34, height: 34)
 
-            Text("\(Text("m").font(.custom("Aleo", size: 15)))\(Text("o").font(.custom("Aleo", size: 15)))\(Text("i").font(.custom("Aleo-Italic", size: 15)))\(Text("n.").font(.custom("Aleo", size: 15)))\(Text("sh").font(.custom("Aleo-Italic", size: 15)))\(Text("i").font(.custom("Aleo", size: 15)))\(Text("ft()").font(.custom("Aleo-Italic", size: 15)))")
+            Text("\(Text("m").font(.custom("Aleo-Regular", size: 15)))\(Text("o").font(.custom("Aleo-Regular", size: 15)))\(Text("i").font(.custom("Aleo-Italic", size: 15)))\(Text("n.").font(.custom("Aleo-Regular", size: 15)))\(Text("sh").font(.custom("Aleo-Italic", size: 15)))\(Text("i").font(.custom("Aleo-Regular", size: 15)))\(Text("ft()").font(.custom("Aleo-Italic", size: 15)))")
             .lineLimit(1)
             .minimumScaleFactor(0.82)
 
