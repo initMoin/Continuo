@@ -114,7 +114,7 @@ struct AboutView: View {
         HStack(alignment: .top, spacing: 24) {
             VStack(spacing: 6) {
                 Link(destination: URL(string: "https://iamshift.dev")!) {
-                    aboutLinkLabel(title: "iamshift.dev") {
+                    aboutSiteLinkLabel {
                         Image("iamshift.dev-logo")
                             .resizable()
                             .scaledToFit()
@@ -170,11 +170,31 @@ struct AboutView: View {
             icon()
                 .frame(width: 34, height: 34)
             Text(title)
-                .font(.subheadline.weight(.medium))
-                .fontDesign(.rounded)
+                .font(title.contains("@") ? ContinuoDesign.Typography.metadata(size: 12) : .subheadline.weight(.medium))
+                .fontDesign(title.contains("@") ? .monospaced : .rounded)
                 .lineLimit(2)
                 .minimumScaleFactor(0.82)
                 .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+            Image(systemName: "arrow.up.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity, minHeight: 36, alignment: .top)
+    }
+
+    private func aboutSiteLinkLabel<Icon: View>(
+        @ViewBuilder icon: () -> Icon
+    ) -> some View {
+        HStack(spacing: 8) {
+            icon()
+                .frame(width: 34, height: 34)
+
+            Text("\(Text("m").font(.custom("Aleo", size: 15)))\(Text("o").font(.custom("Aleo", size: 15)))\(Text("i").font(.custom("Aleo-Italic", size: 15)))\(Text("n.").font(.custom("Aleo", size: 15)))\(Text("sh").font(.custom("Aleo-Italic", size: 15)))\(Text("i").font(.custom("Aleo", size: 15)))\(Text("ft()").font(.custom("Aleo-Italic", size: 15)))")
+            .lineLimit(1)
+            .minimumScaleFactor(0.82)
+
             Spacer(minLength: 0)
             Image(systemName: "arrow.up.right")
                 .font(.caption.weight(.semibold))

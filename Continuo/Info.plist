@@ -14,6 +14,8 @@
 	</dict>
 	<key>UIAppFonts</key>
 	<array>
+		<string>Aleo-VariableFont_wght.ttf</string>
+		<string>Aleo-Italic-VariableFont_wght.ttf</string>
 		<string>RacingSansOne-Regular.ttf</string>
 	</array>
 </dict>
