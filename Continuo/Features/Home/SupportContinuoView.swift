@@ -50,9 +50,10 @@ struct SupportContinuoView: View {
             }
 
         }
+        .padding(.top, 12)
         .padding(.horizontal, 20)
         .padding(.bottom, 20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .fontDesign(.rounded)
         .task {
             await store.loadProducts()

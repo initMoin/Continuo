@@ -59,7 +59,7 @@ struct AboutView: View {
             .sheet(isPresented: $showingSupport) {
                 SupportContinuoView()
 #if os(iOS)
-                    .presentationDetents([.medium])
+                    .presentationDetents([.height(380)])
                     .presentationDragIndicator(.visible)
 #endif
             }
