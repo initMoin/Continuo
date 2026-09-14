@@ -126,7 +126,7 @@ struct AboutView: View {
                 Link(destination: URL(string: "mailto:support@iamshift.dev")!) {
                     aboutLinkLabel(title: "support@iamshift.dev") {
                         Image(systemName: "envelope.fill")
-                            .foregroundStyle(ContinuoDesign.primaryAction)
+                            .foregroundStyle(ContinuoDesign.destructive)
                     }
                 }
                 .buttonStyle(.plain)
@@ -166,7 +166,7 @@ struct AboutView: View {
         title: String,
         @ViewBuilder icon: () -> Icon
     ) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             icon()
                 .frame(width: 34, height: 34)
             Text(title)
@@ -175,10 +175,14 @@ struct AboutView: View {
                 .lineLimit(title.contains("@") ? 1 : 2)
                 .minimumScaleFactor(0.82)
                 .multilineTextAlignment(.leading)
-            Spacer(minLength: 0)
+                .frame(
+                    width: horizontalSizeClass == .compact ? 156 : 200,
+                    alignment: .leading
+                )
             Image(systemName: "arrow.up.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
+                .frame(width: 16)
         }
         .foregroundStyle(.primary)
         .frame(maxWidth: .infinity, minHeight: 36, alignment: .top)
@@ -187,18 +191,22 @@ struct AboutView: View {
     private func aboutSiteLinkLabel<Icon: View>(
         @ViewBuilder icon: () -> Icon
     ) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             icon()
                 .frame(width: 34, height: 34)
 
             Text("\(Text("m").font(.custom("Aleo-Regular", size: 15)))\(Text("o").font(.custom("Aleo-Regular", size: 15)))\(Text("i").font(.custom("Aleo-Italic", size: 15)))\(Text("n.").font(.custom("Aleo-Regular", size: 15)))\(Text("sh").font(.custom("Aleo-Italic", size: 15)))\(Text("i").font(.custom("Aleo-Regular", size: 15)))\(Text("ft()").font(.custom("Aleo-Italic", size: 15)))")
             .lineLimit(1)
             .minimumScaleFactor(0.82)
+            .frame(
+                width: horizontalSizeClass == .compact ? 156 : 200,
+                alignment: .leading
+            )
 
-            Spacer(minLength: 0)
             Image(systemName: "arrow.up.right")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
+                .frame(width: 16)
         }
         .foregroundStyle(.primary)
         .frame(maxWidth: .infinity, minHeight: 36, alignment: .top)
