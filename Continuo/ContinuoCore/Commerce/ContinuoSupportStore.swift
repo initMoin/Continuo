@@ -2,9 +2,9 @@ import Observation
 import StoreKit
 
 enum SupportProduct: String, CaseIterable, Identifiable, Sendable {
-    case lemonCookie = "support.lemon-cookie"
-    case caramelLatte = "support.caramel-latte"
-    case phillyCheesesteak = "support.philly-cheesesteak"
+    case lemonCookie = "continuo.support.lemon_cookie"
+    case caramelLatte = "continuo.support.caramel_latte"
+    case phillyCheesesteak = "continuo.support.philly_cheesesteak"
 
     var id: String { rawValue }
 

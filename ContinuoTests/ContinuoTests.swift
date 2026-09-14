@@ -10,9 +10,9 @@ final class ContinuoTests: XCTestCase {
         XCTAssertEqual(
             SupportProduct.allCases.map(\.rawValue),
             [
-                "support.lemon-cookie",
-                "support.caramel-latte",
-                "support.philly-cheesesteak"
+                "continuo.support.lemon_cookie",
+                "continuo.support.caramel_latte",
+                "continuo.support.philly_cheesesteak"
             ]
         )
     }
