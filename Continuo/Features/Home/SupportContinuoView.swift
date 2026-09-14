@@ -20,9 +20,10 @@ struct SupportContinuoView: View {
                 Button {
                     dismiss()
                 } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 30, height: 30)
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 34, height: 34)
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel("Close support")
@@ -48,12 +49,9 @@ struct SupportContinuoView: View {
                 }
             }
 
-            Text("Optional tips. Continuo remains fully usable without a purchase. Prices are shown in your local currency by Apple.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
         }
-        .padding(20)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 20)
         .fontDesign(.rounded)
         .task {
             await store.loadProducts()
