@@ -117,14 +117,14 @@ struct AboutView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Visit iamshift.dev")
 
-                Link(destination: URL(string: "mailto:support@iamshift.dev")!) {
-                    aboutLinkLabel(title: "support@iamshift.dev") {
+                Link(destination: URL(string: "mailto:hello@iamshift.dev")!) {
+                    aboutLinkLabel(title: "hello@iamshift.dev") {
                         Image(systemName: "envelope.fill")
                             .foregroundStyle(ContinuoDesign.destructive)
                     }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Email support at support@iamshift.dev")
+                .accessibilityLabel("Email support at hello@iamshift.dev")
             }
             .frame(maxWidth: .infinity)
 

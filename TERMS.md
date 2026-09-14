@@ -83,7 +83,7 @@ These Terms, together with the Privacy Policy and any terms expressly incorporat
 
 **Legal operator:** Moinuddin Ahmad / moin.shift()
 
-**Email:** [support@iamshift.dev](mailto:support@iamshift.dev)
+**Email:** [hello@iamshift.dev](mailto:hello@iamshift.dev)
 
 **Website:** [moin.shift()](https://iamshift.dev)
 

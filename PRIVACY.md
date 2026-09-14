@@ -69,7 +69,7 @@ Apple provides Photos, Files, iCloud, Foundation Models, Vision, App Store, and 
 
 Local data remains until you delete it, remove the App, or the operating system removes it. iCloud data remains according to your actions, Apple's service operation, and available storage. Support correspondence is retained only as long as reasonably needed for the request, security, accounting, or legal obligations. We do not have a server-side copy of screenshots that you process only in the App.
 
-You may delete local history in the App, manage Photos and iCloud data through Apple's controls, and request deletion of support correspondence by emailing [**support@iamshift.dev**](mailto:support@iamshift.dev). We may retain information where required by law or reasonably necessary to resolve disputes and prevent abuse.
+You may delete local history in the App, manage Photos and iCloud data through Apple's controls, and request deletion of support correspondence by emailing [**hello@iamshift.dev**](mailto:hello@iamshift.dev). We may retain information where required by law or reasonably necessary to resolve disputes and prevent abuse.
 
 ## 6. Security
 
@@ -93,7 +93,7 @@ We may update this Policy as the App or law changes. We will post the updated ve
 
 ## 11. Contact
 
-**Privacy and general contact:** [support@iamshift.dev](mailto:support@iamshift.dev)
+**Privacy and general contact:** [hello@iamshift.dev](mailto:hello@iamshift.dev)
 
 **Website:** https://iamshift.dev
 

@@ -10,7 +10,7 @@ This Support Policy describes the support available for the Continuo app for iPh
 
 ## Contact support
 
-Email [**support@iamshift.dev**](mailto:support@iamshift.dev).
+Email [**hello@iamshift.dev**](mailto:hello@iamshift.dev).
 
 Please include:
 - a short description of what happened and the result you expected;
@@ -55,7 +55,7 @@ Continuo is an image utility, not a backup, records-management, medical, legal, 
 
 ## Abuse and urgent reports
 
-Do not use support to send unlawful, threatening, abusive, or confidential third-party information. Report security vulnerabilities privately to [**support@iamshift.dev**](mailto:support@iamshift.dev) with “Security” in the subject; do not open a public issue containing an exploit or private data.
+Do not use support to send unlawful, threatening, abusive, or confidential third-party information. Report security vulnerabilities privately to [**hello@iamshift.dev**](mailto:hello@iamshift.dev) with “Security” in the subject; do not open a public issue containing an exploit or private data.
 
 ## Changes
 
@@ -63,7 +63,7 @@ We may update this policy as our support channels or the App change. The current
 
 ## Contact
 
-[support@iamshift.dev](mailto:support@iamshift.dev)
+[hello@iamshift.dev](mailto:hello@iamshift.dev)
 
 [moin.shift()](https://iamshift.dev)
 
