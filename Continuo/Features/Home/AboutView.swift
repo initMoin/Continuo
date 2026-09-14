@@ -9,10 +9,7 @@ struct AboutView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
-                    aboutHero
-                    Text("\(Text("stitch the whole story with ").font(.custom("Aleo-Italic", size: 17)).foregroundStyle(.secondary))\(Text("continuo").font(ContinuoDesign.Typography.title(size: 17)).foregroundStyle(ContinuoDesign.logoGreen))")
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
+                    aboutHeader
                     aboutSection(
                         title: "Where Continuo came from",
                         text: "There are already many apps in the App Store that connect and stitch screenshots into one. However, either they weren’t automated or they stopped working. I needed it for a problem that kept showing up and bugging me. So I built my own solution and maybe it helps you too."
@@ -31,7 +28,8 @@ struct AboutView: View {
                 .frame(maxWidth: horizontalSizeClass == .regular ? 640 : 560)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, ContinuoDesign.Layout.pageHorizontalPadding)
-                .padding(.vertical, 28)
+                .padding(.top, 16)
+                .padding(.bottom, 28)
             }
             .fontDesign(.rounded)
             .navigationTitle("About")
@@ -69,6 +67,17 @@ struct AboutView: View {
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.bottom, 4)
+    }
+
+    private var aboutHeader: some View {
+        VStack(spacing: 12) {
+            aboutHero
+            Text("stitch the whole story")
+                .font(.custom("Aleo-Italic", size: 17))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+        }
     }
 
     private func aboutSection(title: String, text: String) -> some View {
