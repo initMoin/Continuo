@@ -75,6 +75,11 @@ final class ContinuoUITests: XCTestCase {
         about.tap()
         XCTAssertTrue(app.navigationBars["About"].waitForExistence(timeout: 5), "About must open.")
         capture("04-about", screen: XCUIScreen.main)
+
+        let support = app.buttons["Support Continuo"]
+        XCTAssertTrue(support.waitForExistence(timeout: 5), "Support Continuo must be available in About.")
+        support.tap()
+        capture("05-support", screen: XCUIScreen.main)
     }
 
     @MainActor

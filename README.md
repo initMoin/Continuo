@@ -133,7 +133,7 @@ Continuo's optional support purchases are consumables handled by StoreKit 2:
 | `support.caramel-latte` | Caramel Latte | $4.99 |
 | `support.philly-cheesesteak` | Philly Cheesesteak | $9.99 |
 
-For local testing, select `Continuo.storekit` in the scheme's Run options under
+For local testing, select `Continuo/Continuo.storekit` in the scheme's Run options under
 StoreKit Configuration. Production products must be created with the same IDs
 in App Store Connect before submitting the app.
 

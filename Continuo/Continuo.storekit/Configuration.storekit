@@ -1,0 +1,91 @@
+{
+  "appPolicies" : {
+    "eula" : "",
+    "policies" : [
+      {
+        "locale" : "en_US",
+        "policyText" : "",
+        "policyURL" : ""
+      }
+    ]
+  },
+  "identifier" : "7D4F2A91",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "2.99",
+      "familyShareable" : false,
+      "internalID" : "D2A6B0C3",
+      "localizations" : [
+        {
+          "description" : "An optional tip to support Continuo development.",
+          "displayName" : "Lemon Cookie",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "support.lemon-cookie",
+      "promotionalImageID" : "8C712199",
+      "referenceName" : "Lemon Cookie",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : false,
+      "internalID" : "A4F1C6E8",
+      "localizations" : [
+        {
+          "description" : "An optional tip to support Continuo development.",
+          "displayName" : "Caramel Latte",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "support.caramel-latte",
+      "referenceName" : "Caramel Latte",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "9.99",
+      "familyShareable" : false,
+      "internalID" : "9B7E3D14",
+      "localizations" : [
+        {
+          "description" : "An optional tip to support Continuo development.",
+          "displayName" : "Philly Cheesesteak",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "support.philly-cheesesteak",
+      "referenceName" : "Philly Cheesesteak",
+      "type" : "Consumable"
+    }
+  ],
+  "settings" : {
+    "_askToBuyEnabled" : false,
+    "_billingGracePeriodEnabled" : false,
+    "_billingIssuesEnabled" : false,
+    "_disableDialogs" : false,
+    "_failTransactionsEnabled" : false,
+    "_locale" : "en_US",
+    "_renewalBillingIssuesEnabled" : false,
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+
+    ],
+    "_timeRate" : 0
+  },
+  "subscriptionBundleGroups" : [
+
+  ],
+  "subscriptionGroups" : [
+
+  ],
+  "subscriptionSuiteGroups" : [
+
+  ],
+  "version" : {
+    "major" : 6,
+    "minor" : 3
+  }
+}

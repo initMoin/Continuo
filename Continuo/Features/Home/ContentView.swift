@@ -192,6 +192,12 @@ struct ContentView: View {
       HStack(spacing: 16) {
          appTitle
          Spacer(minLength: 20)
+//         Button("Snap") {
+//             if let window = NSApp.windows.first {
+//                 window.setContentSize(NSSize(width: 2880, height: 1800))
+//                 window.center()
+//             }
+//         }
          GlassEffectContainer(spacing: 8) {
             HStack(spacing: 8) {
                macImportAction

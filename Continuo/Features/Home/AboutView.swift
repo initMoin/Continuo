@@ -3,6 +3,7 @@ import SwiftUI
 struct AboutView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var showingSupport = false
 
     private var versionText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -54,6 +55,12 @@ struct AboutView: View {
                         dismiss()
                     }
                 }
+            }
+            .sheet(isPresented: $showingSupport) {
+                SupportContinuoView()
+#if os(iOS)
+                    .presentationDetents([.medium])
+#endif
             }
         }
 #if os(macOS)
@@ -133,8 +140,8 @@ struct AboutView: View {
     }
 
     private var supportLink: some View {
-        NavigationLink {
-            SupportContinuoView()
+        Button {
+            showingSupport = true
         } label: {
             VStack(spacing: 7) {
                 Image(systemName: "heart.fill")

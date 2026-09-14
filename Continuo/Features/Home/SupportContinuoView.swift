@@ -3,95 +3,84 @@ import SwiftUI
 
 struct SupportContinuoView: View {
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var store = ContinuoSupportStore()
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    VStack(spacing: 8) {
-                        Text("Support Continuo")
-                            .font(.title2.weight(.semibold))
-                        Text("Continuo is free to use. These optional purchases are a simple way to support its continued development.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 440)
-                    }
-
-                    if store.isLoading {
-                        ProgressView()
-                            .controlSize(.regular)
-                            .padding(.vertical, 20)
-                    } else if store.products.isEmpty {
-                        ContentUnavailableView(
-                            "Support purchases unavailable",
-                            systemImage: "cart.badge.questionmark",
-                            description: Text(store.errorMessage ?? "Try again later.")
-                        )
-                    } else {
-                        VStack(spacing: 12) {
-                            ForEach(SupportProduct.allCases) { supportProduct in
-                                if let product = store.product(for: supportProduct) {
-                                    supportProductRow(supportProduct, product: product)
-                                }
-                            }
-                        }
-                        .frame(maxWidth: 480)
-                    }
-
-                    Text("Prices are shown in your local currency by Apple. Purchases are optional tips and do not unlock app functionality.")
-                        .font(.footnote)
+        VStack(spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Support Continuo")
+                        .font(.title2.weight(.semibold))
+                    Text("A small thank-you helps keep the stitches moving.")
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 440)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, ContinuoDesign.Layout.pageHorizontalPadding)
-                .padding(.vertical, 28)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Close support")
             }
-            .fontDesign(.rounded)
-            .navigationTitle("Support Continuo")
-#if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-#endif
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        dismiss()
+
+            if store.isLoading {
+                ProgressView()
+                    .controlSize(.regular)
+                    .padding(.vertical, 28)
+            } else if store.products.isEmpty {
+                ContentUnavailableView(
+                    "Tips unavailable",
+                    systemImage: "cart.badge.questionmark",
+                    description: Text(store.errorMessage ?? "Try again later.")
+                )
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(SupportProduct.allCases) { supportProduct in
+                        if let product = store.product(for: supportProduct) {
+                            supportProductRow(supportProduct, product: product)
+                        }
                     }
-                    .disabled(store.purchasingProductID != nil)
                 }
             }
-            .task {
-                await store.loadProducts()
-            }
-            .alert(
-                "Support purchase",
-                isPresented: Binding(
-                    get: { store.completionMessage != nil },
-                    set: { if !$0 { store.completionMessage = nil } }
-                )
-            ) {
-                Button("Done", role: .cancel) {}
-            } message: {
-                Text(store.completionMessage ?? "Thank you for supporting Continuo.")
-            }
-            .alert(
-                "Couldn’t complete support purchase",
-                isPresented: Binding(
-                    get: { store.errorMessage != nil && !store.isLoading && !store.products.isEmpty },
-                    set: { if !$0 { store.errorMessage = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text(store.errorMessage ?? "Continuo could not complete the purchase.")
-            }
+
+            Text("Optional tips. Continuo remains fully usable without a purchase. Prices are shown in your local currency by Apple.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(20)
+        .fontDesign(.rounded)
+        .task {
+            await store.loadProducts()
+        }
+        .alert(
+            "Support purchase",
+            isPresented: Binding(
+                get: { store.completionMessage != nil },
+                set: { if !$0 { store.completionMessage = nil } }
+            )
+        ) {
+            Button("Done", role: .cancel) {}
+        } message: {
+            Text(store.completionMessage ?? "Thank you for supporting Continuo.")
+        }
+        .alert(
+            "Couldn’t complete support purchase",
+            isPresented: Binding(
+                get: { store.errorMessage != nil && !store.isLoading && !store.products.isEmpty },
+                set: { if !$0 { store.errorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.errorMessage ?? "Continuo could not complete the purchase.")
         }
 #if os(macOS)
-        .frame(width: 640, height: 600, alignment: .topLeading)
+        .frame(width: 520, height: 480, alignment: .topLeading)
 #endif
     }
 
@@ -110,7 +99,7 @@ struct SupportContinuoView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(supportProduct.title)
                         .font(.headline)
-                    Text("Optional support")
+                    Text(supportProduct.message)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
