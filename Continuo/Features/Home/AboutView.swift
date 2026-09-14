@@ -5,23 +5,12 @@ struct AboutView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showingSupport = false
 
-    private var versionText: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-        return switch (version, build) {
-        case let (version?, _): "Version \(version)"
-        default: "Development build"
-        }
-    }
-
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     aboutHero
-                    Text("Stitch the whole story with Continuo")
-                        .font(.custom("Aleo-Italic", size: 17))
-                        .foregroundStyle(.secondary)
+                    Text("\(Text("stitch the whole story with ").font(.custom("Aleo-Italic", size: 17)).foregroundStyle(.secondary))\(Text("continuo").font(ContinuoDesign.Typography.title(size: 17)).foregroundStyle(ContinuoDesign.logoGreen))")
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                     aboutSection(
@@ -77,10 +66,6 @@ struct AboutView: View {
                 .frame(maxWidth: 280, maxHeight: 48)
                 .accessibilityHidden(true)
 
-            Text(versionText)
-                .font(ContinuoDesign.Typography.metadata())
-                .fontDesign(.monospaced)
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.bottom, 4)
